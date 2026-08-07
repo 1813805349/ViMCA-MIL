@@ -1,0 +1,1529 @@
+---
+title: "03Clinical_phenotype_analysis"
+output: html_document
+---
+
+#load pkgs
+
+```{r}
+library(openxlsx)
+library(data.table)
+library(dplyr)
+library(stringr)
+library(caret)
+library(ggthemes)
+library(ggpubr)
+library(patchwork)
+library(ggrepel)
+library(ggplot2)
+library(cowplot)
+library(readxl)
+library(RColorBrewer)
+library(parallel)
+library(ComplexHeatmap)
+library(circlize)
+library(scales)
+library(tidyr)
+library(ggsci)
+library(Biostrings)
+library(GSEABase)
+library(eulerr)
+library(enrichplot)
+library(clusterProfiler)
+library(GseaVis)
+```
+
+#Adjusted code
+```{r}
+pheno_raw2<-readRDS("../data/clinical_phenotype_analysis/pheno_raw.rds")
+metainfo_chengdu<-read.xlsx("../data/Chengdu_data/Chengdu_metainfo.xlsx")
+pheno_raw2<-pheno_raw2[pheno_raw2$Name%in%metainfo_chengdu$sample_id,]
+setDT(pheno_raw2)
+pheno2 <- pheno_raw2
+pheno3 <- pheno2
+
+NormFun <- function(x) {
+  bestNormalize::orderNorm(x)$x.t
+}
+
+pt <- 6:83
+
+for (j in pt) {
+  # print(j)
+  Tab0 <- pheno2[, c(2, 3, 4, j), with = FALSE]
+  colnames(Tab0)[4] <- "before"
+  
+  # 1. INT
+  Tab0[!is.na(before), Normal1 := NormFun(before)]
+  # 2. Outlier Removal (+- 3SD)
+  Tab0[!is.na(Normal1), Type := ifelse(Normal1 < mean(Normal1) - 3 * sd(Normal1) | 
+                                       Normal1 > mean(Normal1) + 3 * sd(Normal1), "O", "I")]
+  # 3. INT again
+  Tab0[Type == "I", Normal2 := NormFun(before)]
+  Tab0[Type == "O", Normal2 := NA]
+  
+  # 4. Regression
+  set.seed(123)
+  train.control <- caret::trainControl(method = "cv", number = 10)
+  Tab0[, beta0 := 1]
+  
+  current_var <- var(Tab0$Normal2[!is.na(Tab0$Normal2)])
+  if (is.na(current_var) || current_var == 0) {
+    print(paste("Trait:", j, "Skipping: Zero variance"))
+    pheno3[[j]] <- NA
+    next
+  }
+  
+  step.model <- caret::train(Normal2 ~ beta0 + Age + Gender + CCI_Score_Quan2011, 
+                      data = Tab0[!is.na(Normal2), ],
+                      method = "leapSeq",
+                      tuneGrid = data.frame(nvmax = 1:3),
+                      trControl = train.control)
+  
+  # 5. Residuals & 6. INT
+  Tab0[!is.na(Normal2), residuals := residuals(step.model)]
+  Tab0[!is.na(Normal2), after := NormFun(residuals)]
+  pheno3[[j]] <- Tab0$after
+  
+  rm(list = c("Tab0", "step.model"))
+  gc()
+}
+saveRDS(pheno3, "../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds")
+```
+
+#sample summary
+```{r}
+pheno1 <- as.data.table(readRDS("../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds"))
+write.xlsx(pheno1,"../table/TableS1_Clinical_feature.xlsx")
+
+#Fig2A
+p1<-ggplot(pheno1, aes(x = Age, fill = Gender)) +
+  geom_histogram(binwidth = 5, boundary = 0, color = "white", linewidth = 0.2) +
+  scale_x_continuous(breaks = seq(0, 105, by = 5)) +
+  scale_fill_manual(values = c("Female" = "#D9C39E", "Male" = "#A9A9A9")) +
+  labs(x = "Age", y = "Cases", fill = "Gender") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12), # X轴文字旋转
+    axis.title = element_text(size = 14),
+    legend.position = "top", # 图例置于上方
+    legend.title = element_text(face = "bold")
+  )
+ggsave("../result/03clinical_phenotype_analysis/sample_age_gender_distribution.pdf",p1,width = 5,height = 4.5)
+
+pheno1$Confirmed_date<-as.Date(pheno1$Confirmed_date)
+
+df_plot <- pheno1 %>%
+  dplyr::group_by(Confirmed_date) %>%
+  dplyr::summarise(daily_cases = n()) %>%
+  dplyr::arrange(Confirmed_date) %>%
+  dplyr::mutate(cumulative_cases = cumsum(daily_cases))
+
+max_daily <- max(df_plot$daily_cases)
+max_cum <- max(df_plot$cumulative_cases)
+scale_factor <- max_cum / max_daily
+
+total_rows <- nrow(df_plot)
+tick_indices <- round(seq(1, total_rows, length.out = 9))
+
+
+p2 <- ggplot(df_plot, aes(x = as.numeric(row.names(df_plot)))) + 
+  geom_col(aes(y = daily_cases), fill = "#69b3a2", alpha = 0.8) +
+  geom_line(aes(y = cumulative_cases / scale_factor), 
+            color = "#4D4D4D", 
+            linetype = "dashed", 
+            linewidth = 1, 
+            group = 1) +
+  scale_y_continuous(
+    name = "Daily number of cases", 
+    sec.axis = sec_axis(~ . * scale_factor, name = "Cumulative number of cases")
+  ) +
+  scale_x_continuous(
+    breaks = tick_indices,
+    labels = format(df_plot$Confirmed_date[tick_indices], "%b %Y")
+  ) +
+  # --------------------------------------------------
+  labs(x = "Date") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.title.y = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.title.y.right = element_text(size = 12, color = "#4D4D4D"),
+    axis.text.y.right = element_text(color = "#4D4D4D")
+  )
+
+ggsave("../result/03clinical_phenotype_analysis/clinical_sample_distribution.pdf",p2,width = 6,height = 4.5)
+```
+
+#Pearson correlation analys over time
+```{r}
+pheno1 <- readRDS('../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds')
+ins_pheno_map <- read.xlsx("../data/clinical_phenotype_analysis/clinical_phenotype_ref.xlsx")
+ins_pheno_map$Severity.relationship[grepl('Unknow', ins_pheno_map$Severity.relationship)] <- "Unknown"
+ins_pheno_map$Severity.relationship[grepl('Positive', ins_pheno_map$Severity.relationship)] <- "Severe"
+ins_pheno_map$Severity.relationship[grepl('Negative', ins_pheno_map$Severity.relationship)] <- "Nonsevere"
+ins_pheno_map$Trait <- gsub(" ", ".", ins_pheno_map$Trait)
+length(intersect(colnames(pheno1),ins_pheno_map$Trait))#78
+
+# Time Correlation Analysis
+pheno1$Confirmed_date <- as.Date(pheno1$Confirmed_date)
+pheno1<-pheno1[order(pheno1$Confirmed_date,decreasing = F),]
+
+
+cor_res <- lapply(6:83, function(i) {
+  pheno1 <- as.data.frame(pheno1)
+  tmp1<-pheno1[,c(5,i)]
+  colnames(tmp1)[2]<-"v1"
+  tmp1<-tmp1[!is.na(tmp1$v1),]
+  tmp1$od<-1:nrow(tmp1)
+  cor_test <- cor.test(tmp1$od, tmp1$v1, method = "pearson")
+  data.frame(
+    trait = colnames(pheno1)[i],
+    correlation_coef = cor_test$estimate,
+    pvalue = cor_test$p.value,
+    stringsAsFactors = FALSE
+  )
+}) %>% do.call(rbind, .)
+
+cor_res$Severe_type <- ins_pheno_map$Severity.relationship[match(cor_res$trait, ins_pheno_map$Trait)]
+cor_res$Severe_type <- factor(cor_res$Severe_type, levels = c("Severe", "Nonsevere", "Unknown"))
+
+saveRDS(cor_res,"../data/clinical_phenotype_analysis/Time_cef_CCI.rds")
+
+cor_res<-readRDS("../data/clinical_phenotype_analysis/Time_cef_CCI.rds")
+
+#TableS4
+cor_res$Ref<-ins_pheno_map$Ref[match(cor_res$trait,ins_pheno_map$Trait)]
+write.xlsx(cor_res,"../table/TableS4_clinical_feature_tepmoral_analysis.xlsx")
+#Fig2B
+p1 <- ggplot(cor_res, aes(x = correlation_coef, y = -log10(pvalue), color = Severe_type, label = trait)) +
+  geom_point(alpha = 0.7,aes(size=abs(correlation_coef))) +
+   # geom_vline(xintercept = c(0.2,-0.2), linetype = "dashed", color = "gray50", alpha = 0.5) +
+  scale_color_manual(values = c("Severe" = "#E41A1C", "Nonsevere" = "#377EB8", "Unknown" = "#999999")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50", alpha = 0.5) +
+  geom_text_repel() +
+  theme_classic(base_size = 16) +
+  labs(x = "PCC", y = "-log10 (P-value)",color="",size="Absoluted PCC")
+
+ggsave("../result/03clinical_phenotype_analysis/volcano_timeCoef.pdf", p1, width = 7, height = 4.5)
+
+
+
+#FigS2A
+cor_res$group<-ifelse(cor_res$correlation_coef>0,"Positive","Negative")
+table(cor_res$group[cor_res$pvalue<0.05])
+cor_res_sig<-cor_res[cor_res$pvalue<0.05,]
+cor_res_sig$freq=1
+
+df_test<-aggregate(data=cor_res_sig,freq~Severe_type+group,sum)
+df_test$pct<-NA
+df_test$pct[c(1,2,3)]<-(df_test$freq[c(1,2,3)]/22)*100
+df_test$pct[c(4,5,6)]<-(df_test$freq[c(4,5,6)]/16)*100
+df_test$group<-factor(df_test$group,levels = c("Positive","Negative"))
+
+p4<-ggplot(df_test, aes(x = group, y = freq, fill = Severe_type)) +
+    geom_col(position = "dodge", width = 0.6, color = "white", linewidth = 0.5) +
+   geom_text(aes(label = freq),
+            position = position_dodge(width = 0.6),
+            vjust = -0.3,
+            size = 5)+
+    scale_y_continuous(expand = c(0, 0))+
+   scale_fill_manual(values = c("#E41A1C","#377EB8","grey"))+
+  theme_classic2(base_size = 16)+
+  labs(x="",y="Number of trait",fill="")+
+  scale_y_continuous(
+  limits = c(0, 13),
+  breaks = seq(0,12,3)
+)
+ggsave("../result/03clinical_phenotype_analysis/Trait_severe_barplot_by_cor.pdf", p4, width = 5.3, height = 3.7)
+
+
+#FigS3
+trait_info <- cor_res_sig %>%
+  dplyr::select(trait, correlation_coef) %>%
+  dplyr::distinct()
+
+trait_info$group2 <- cor_res_sig$Severe_type[match(trait_info$trait, cor_res_sig$trait)]
+
+trait_info$title_col <- ifelse(trait_info$group2 == "Severe", "#E41A1C",
+                               ifelse(trait_info$group2 == "Nonsevere", "#377EB8", "black"))
+
+
+trait_pos<-trait_info[trait_info$correlation_coef > 0,]
+trait_pos <- trait_pos$trait[order(trait_pos$correlation_coef,decreasing = T)]
+trait_neg <- trait_info[trait_info$correlation_coef < 0,]
+trait_neg <- trait_neg$trait[order(trait_neg$correlation_coef,decreasing = F)]
+
+plot_list_pos <- lapply(trait_pos, function(tr){
+
+  tmp1 <- pheno1[!is.na(pheno1[[tr]]),]
+  tmp1<-tmp1[order(tmp1$Confirmed_date,decreasing = F),]
+  tmp1$od <- 1:nrow(tmp1)
+
+  title_col <- trait_info$title_col[match(tr, trait_info$trait)]
+
+  ggplot(tmp1, aes(x = od, y = .data[[tr]])) +
+    geom_point(color = "#00BFC4", size = 1) +
+    geom_smooth(method = "lm", color = "#F8766D", se = TRUE) +
+    stat_cor(method = "pearson", aes(label = paste0("italic(r)~`=`~", signif(after_stat(r), 2), "~`,`~italic(p)~`=`~", signif(after_stat(p), 2))), parse = TRUE, label.x.npc = "left", label.y.npc = "top")  +
+    theme_classic2(base_size = 16) +
+    theme(
+      plot.title = element_text(color = title_col,  hjust = 0.5),
+      axis.title.y = ggtext::element_markdown(color = title_col, face = "bold"),
+      axis.title.x = element_text(size = 10)
+    ) +
+    labs(
+      x = "Time",
+      y = paste0("<span style='color:", title_col, ";'>", tr, "</span>")
+    )
+})
+
+plot_list_neg <- lapply(trait_neg, function(tr){
+
+  tmp1 <- pheno1[!is.na(pheno1[[tr]]),]
+  tmp1<-tmp1[order(tmp1$Confirmed_date,decreasing = F),]
+  tmp1$od <- 1:nrow(tmp1)
+
+  title_col <- trait_info$title_col[match(tr, trait_info$trait)]
+
+  ggplot(tmp1, aes(x = od, y = .data[[tr]])) +
+    geom_point(color = "#00BFC4", size = 1) +
+    geom_smooth(method = "lm", color = "#F8766D", se = TRUE) +
+    stat_cor(method = "pearson", aes(label = paste0("italic(r)~`=`~", signif(after_stat(r), 2), "~`,`~italic(p)~`=`~", signif(after_stat(p), 2))), parse = TRUE, label.x.npc = "left", label.y.npc = "top")  +
+    theme_classic2(base_size = 16) +
+    theme(
+      plot.title = element_text(color = title_col, hjust = 0.5),
+      axis.title.y = ggtext::element_markdown(color = title_col, face = "bold"),
+      axis.title.x = element_text(size = 10)
+    ) +
+    labs(
+      x = "Time",
+      y = paste0("<span style='color:", title_col, ";'>", tr, "</span>")
+    )
+})
+
+p_pos <- wrap_plots(plot_list_pos, ncol = 5) +
+  plot_annotation(title = "Positive Correlation Traits")
+
+p_neg <- wrap_plots(plot_list_neg, ncol = 5) +
+  plot_annotation(title = "Negative Correlation Traits")
+
+p_all <- p_pos / p_neg + plot_layout(heights = c(4, 5))
+ggsave("../result/03clinical_phenotype_analysis/Triat_timeCoef.pdf", p_all, width = 14, height = 21)
+
+
+#Fig2C,FigS2B-C
+trait_severity <- ins_pheno_map %>%
+  dplyr::select(Trait,Severity.relationship) %>%
+  dplyr::distinct()
+
+
+traits_use <- trait_severity %>%
+  dplyr::pull(Trait) %>%
+  unique()
+
+
+plot_df <- pheno1 %>%
+  dplyr::select(Name,Confirmed_date,dplyr::all_of(traits_use)) %>%
+  tidyr::pivot_longer(cols=dplyr::all_of(traits_use),names_to="Trait",values_to="value") %>%
+  dplyr::filter(!is.na(value),!is.na(Confirmed_date)) %>%
+  dplyr::mutate(Confirmed_date=as.Date(Confirmed_date)) %>%
+  dplyr::left_join(trait_severity,by="Trait")
+
+plot_df_order <- plot_df %>%
+  dplyr::group_by(Trait) %>%
+  dplyr::arrange(Confirmed_date,Name,.by_group=TRUE) %>%
+  dplyr::mutate(sample_order=dplyr::row_number(),n_sample=dplyr::n(),relative_order=ifelse(n_sample>1,(sample_order-1)/(n_sample-1),0)) %>%
+  dplyr::ungroup()
+
+
+
+severity_col <- c(Severe="#E41A1C",Nonsevere="#377EB8",Unknown="grey50")
+
+group_trend_df <- plot_df_order %>%
+  dplyr::mutate(order_bin=cut(relative_order,breaks=seq(0,1,length.out=21),include.lowest=TRUE,labels=FALSE)) %>%
+  dplyr::group_by(Severity.relationship,Trait,order_bin) %>%
+  dplyr::summarise(relative_order=mean(relative_order,na.rm=TRUE),trait_mean=mean(value,na.rm=TRUE),.groups="drop") %>%
+  dplyr::group_by(Severity.relationship,order_bin) %>%
+  dplyr::summarise(relative_order=mean(relative_order,na.rm=TRUE),value=mean(trait_mean,na.rm=TRUE),n_trait=dplyr::n_distinct(Trait),.groups="drop")
+
+table(cor_res$Severe_type)
+#Severe Nonsevere   Unknown 
+#       32        26        20 
+p2_order <- ggplot2::ggplot()+
+  ggplot2::facet_wrap(~Severity.relationship,scales="free_y")+
+  ggplot2::geom_smooth(data=dplyr::filter(plot_df_order,Severity.relationship=="Severe"),ggplot2::aes(x=relative_order,y=value,group=Trait),method="gam",formula=y~s(x,k=5),se=FALSE,color="#F4A3A3",linewidth=0.45,alpha=0.45)+
+  ggplot2::geom_smooth(data=dplyr::filter(plot_df_order,Severity.relationship=="Nonsevere"),ggplot2::aes(x=relative_order,y=value,group=Trait),method="gam",formula=y~s(x,k=5),se=FALSE,color="#9CBFE5",linewidth=0.45,alpha=0.45)+
+  ggplot2::geom_smooth(data=dplyr::filter(plot_df_order,Severity.relationship=="Unknown"),ggplot2::aes(x=relative_order,y=value,group=Trait),method="gam",formula=y~s(x,k=5),se=FALSE,color="grey85",linewidth=0.45,alpha=0.45)+
+  ggplot2::geom_smooth(data=plot_df_order,ggplot2::aes(x=relative_order,y=value,group=Severity.relationship,color=Severity.relationship),method="lm",se=TRUE,linewidth=1.8,alpha=0.15)+
+  # ggpubr::stat_cor(data=plot_df_order,ggplot2::aes(x=relative_order,y=value,label=after_stat(paste(r.label,p.label,sep="~~~"))),method="pearson",label.x.npc="left",label.y.npc="top",size=4,inherit.aes=FALSE)+
+  ggpubr::stat_cor(data=group_trend_df,ggplot2::aes(x=relative_order,y=value,label=after_stat(paste(r.label,p.label,sep="~~~"))),method="spearman",label.x.npc="left",label.y.npc="top",size=4,inherit.aes=FALSE)+
+  ggplot2::scale_color_manual(values=severity_col)+
+  ggplot2::labs(x="Relative sampling order",y="Normalized value",color="Severity relationship")+
+  ggplot2::theme_classic(base_size=14)+
+  ggplot2::theme(axis.text.x=ggplot2::element_blank(),axis.ticks.x=ggplot2::element_blank(),legend.position="right")
+
+
+ggsave("../result/03clinical_phenotype_analysis/Triat_time_trend.pdf", p2_order, width = 11, height = 4)
+
+```
+
+#MIL model
+##EVEscape fitness
+###MSA
+```{r}
+gene_struc <- openxlsx::read.xlsx("../data/SARS_CoV_2_reference/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc$gene[1:17]<-toupper(gene_struc$gene[1:17])
+
+genome <- readDNAStringSet("../data/SARS_CoV_2_reference/MN908947.genome.fasta")[[1]]
+
+
+getRefseq <- function(protein,genome, gene_structure) {
+  targene_ranges <- gene_structure[gene_structure$gene==protein]
+    exon_seq <- subseq(genome, (targene_ranges$start), (targene_ranges$end))
+    protein_seq <- Biostrings::translate(exon_seq)
+  return(protein_seq)
+}
+
+gene_struc<-gene_struc[-12:-13,]
+lapply(gene_struc$gene,function(g){
+  seq<-getRefseq(g,genome, gene_struc)
+  seq<- AAStringSet(seq)
+  names(seq)<-g
+  writeXStringSet(seq,paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/Covid_UniRef_seq/",g,"_ref.fasta"))
+})
+
+gene_struc_2<-data.table(features=c("gene","gene",gene_struc$features[18:27]),
+                           start=c(266,13468,gene_struc$start[18:27]),
+                           end=c(13468,21555,gene_struc$end[18:27]),
+                           ORF=c("ORF1a","ORF1b",gene_struc$ORF[18:27]),
+                           locus_tag=c(NA,NA,gene_struc$locus_tag[18:27]),
+                           gene=c("ORF1a","ORF1b",gene_struc$gene[18:27]),
+                           protein_id=c(NA,NA,gene_struc$protein_id[18:27]),
+                            note=c(NA,NA,gene_struc$note[18:27]))
+seq_orf1a<-getRefseq("ORF1a",genome, gene_struc_2)
+seq_orf1a<- AAStringSet(seq_orf1a)
+names(seq_orf1a)<-"ORF1a"
+writeXStringSet(seq_orf1a,paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/Covid_UniRef_seq/","ORF1a","_ref.fasta"))
+
+seq_NSP12_1<- subseq(genome, 13442, 13468)
+seq_NSP12_2<- subseq(genome, 13468, 16236)
+seq_NSP12_1<- Biostrings::translate(seq_NSP12_1)
+seq_NSP12_2<- Biostrings::translate(seq_NSP12_2)
+seq_NSP12<- AAStringSet(c(seq_NSP12_1,seq_NSP12_2))
+names(seq_NSP12)<-"NSP12"
+writeXStringSet(seq_NSP12,paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/Covid_UniRef_seq/","NSP12_ref.fasta"))
+```
+
+
+
+```{r}
+gene_struc <- openxlsx::read.xlsx("../data/SARS_CoV_2_reference/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc$gene[1:17]<-toupper(gene_struc$gene[1:17])
+
+lapply(gene_struc$gene[-1],function(g){
+  conf<-read.table("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/EVcoupling/NSP1_config.txt",sep="\n")
+  conf$V1<-gsub("NSP1",g,conf$V1)
+  write.table(conf,paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/EVcoupling/",g,"_config.txt"),sep = "\n",quote = F,col.names = F,row.names = F)
+})
+```
+
+```{bash}
+#5130 
+for g in NSP2 NSP3 NSP4 NSP5 NSP6 NSP7 NSP8 NSP9 NSP10 NSP11 NSP12 NSP13 NSP14 NSP15 NSP16 S ORF3a E M ORF6 ORF7a ORF7b ORF8 N ORF10;
+do
+    echo ${g}
+    evcouplings_runcfg ${g}_config.txt
+done
+```
+
+
+###EVE
+```{r}
+gene_struc <- openxlsx::read.xlsx("/mnt/raid62/Personal_data/linghukepan/03proj/09nCoV/00data/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc$gene[1:17]<-toupper(gene_struc$gene[1:17])
+gene_struc<-gene_struc[-12,]
+prot_map<-data.frame(protein_name=paste0(gene_struc$gene,"_EVE"),msa_location=paste0(gene_struc$gene,"_EVE.a2m"),theta=0.01)
+write.csv(prot_map,"/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/EVcoupling/output/protein_mapping.csv",sep = ",",col.names = T,row.names = F,quote = F)
+
+prot_length<-lapply(gene_struc$gene,function(g){
+  tmp1<-readAAStringSet(paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/Covid_UniRef_seq/",g,"_ref.fasta"))
+   tmp2<-data.frame(protein=g,length=width(tmp1))
+   return(tmp2)
+})%>%do.call(rbind,.)
+```
+
+##Viral genotype
+```{r}
+metainfo_chengdu<-read.xlsx("../data/Chengdu_data/Chengdu_metainfo.xlsx")
+pheno1 <- readRDS('../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds')
+metainfo_chengdu<-metainfo_chengdu[metainfo_chengdu$sample_id%in%pheno1$Name,]#490
+nnSub<-lapply(metainfo_chengdu$sample_id,function(i){
+nnSubs<-strsplit(metainfo_chengdu$substitutions[metainfo_chengdu$sample_id==i],",")%>%unlist()
+  if(length(nnSubs)>0){
+    tmp1<-data.frame(sample_id=i,nnSub=nnSubs)
+    return(tmp1)
+  }
+  else return(NULL)
+})%>%do.call(rbind,.)
+nnSub<-nnSub[!is.na(nnSub$nnSub),]
+
+
+AASub<-lapply(metainfo_chengdu$sample_id,function(i){
+  AASubs<-strsplit(metainfo_chengdu$aaSubstitutions[metainfo_chengdu$sample_id==i],",")%>%unlist()
+  if(length(AASubs)>0){
+    tmp1<-data.frame(sample_id=i,AASub=AASubs)
+    return(tmp1)
+  }
+})%>%do.call(rbind,.)
+AASub<-AASub[!is.na(AASub$AASub),]
+
+gene_struc <- openxlsx::read.xlsx("../data/SARS_CoV_2_reference/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc_2<-data.table(features=c("gene","gene",gene_struc$features[18:27]),
+                           start=c(266,13468,gene_struc$start[18:27]),
+                           end=c(13468,21555,gene_struc$end[18:27]),
+                           ORF=c("ORF1a","ORF1b",gene_struc$ORF[18:27]),
+                           locus_tag=c(NA,NA,gene_struc$locus_tag[18:27]),
+                           gene=c("ORF1a","ORF1b",gene_struc$gene[18:27]),
+                           protein_id=c(NA,NA,gene_struc$protein_id[18:27]),
+                            note=c(NA,NA,gene_struc$note[18:27]))
+  
+gene_struc_2 <- split(gene_struc_2, gene_struc_2[, gene])
+gene_struc_2 <- lapply(gene_struc_2, function(x) x[, IRanges(start = start, end = end)])
+gene_struc_2 <- IRangesList(gene_struc_2)
+
+gene_struc <- split(gene_struc, gene_struc[, gene])
+gene_struc <- lapply(gene_struc, function(x) x[, IRanges(start = start, end = end)])
+gene_struc <- IRangesList(gene_struc)
+
+genome <- readDNAStringSet("../data/SARS_CoV_2_reference/MN908947.genome.fasta")[[1]]
+
+Mut2AA <- function(id, genome, gene_structure) {
+  ref <- unlist(strsplit(stringr::str_remove_all(id, "([[:digit:]])"), ""))[1]
+  alt <- unlist(strsplit(stringr::str_remove_all(id, "([[:digit:]])"), ""))[2]
+  pos <- as.numeric(stringr::str_remove_all(id, "([[:alpha:]])"))
+  
+  stopifnot(as.character(subseq(genome, pos, pos)) == ref)
+  genome2 <- Biostrings::replaceLetterAt(x = genome, at = pos, letter = alt)
+  stopifnot(as.character(subseq(genome2, pos, pos)) == alt)
+  targene <- unique(names(unlist(gene_structure))[start(unlist(gene_structure)) <= pos & end(unlist(gene_structure)) >= pos])
+  
+  if(length(targene) == 0) {
+    return(paste0("intergenic","(",id,")"))
+  } else {
+    if(length(targene) == 1) {
+      gene_structure_i <- gene_structure[[targene]]
+      cds1 <- DNAString(paste0(lapply(seq_along(gene_structure_i), function(i) {
+        as.character(subseq(genome, start(gene_structure_i[i]), end(gene_structure_i[i])))
+      }), collapse = ""))
+      cds2 <- DNAString(paste0(lapply(seq_along(gene_structure_i), function(i) {
+        as.character(subseq(genome2, start(gene_structure_i[i]), end(gene_structure_i[i])))
+      }), collapse = ""))
+      
+      p1 <- Biostrings::translate(cds1); p2 <- Biostrings::translate(cds2)
+      
+      pos2 <- which(unlist(strsplit(as.character(p1), "")) != unlist(strsplit(as.character(p2), "")))
+      if(length(pos2) == 0) {
+        pos2=ceiling((pos-gene_structure_i@start)/3)
+        pos2<-pos2[1]
+        ref2 <- unlist(strsplit(as.character(p1), ""))[pos2]
+        alt2 <- unlist(strsplit(as.character(p2), ""))[pos2]
+         paste0(mapply(seq_along(pos2), FUN = function(j) {
+          return(paste0("Synonymous:",toupper(targene), ":", ref2[j], pos2[j], alt2[j]))
+        }), collapse = "; ")
+      } else {
+        ref2 <- unlist(strsplit(as.character(p1), ""))[pos2]
+        alt2 <- unlist(strsplit(as.character(p2), ""))[pos2]
+        paste0(mapply(seq_along(pos2), FUN = function(j) {
+          return(paste0(toupper(targene), ":", ref2[j], pos2[j], alt2[j]))
+        }), collapse = "; ")
+      }
+    } else {
+      res <- lapply(targene, function(g) {
+        gene_structure_i <- gene_structure[[g]]
+        cds1 <- DNAString(paste0(lapply(seq_along(gene_structure_i), function(i) {
+          as.character(subseq(genome, start(gene_structure_i[i]), end(gene_structure_i[i])))
+        }), collapse = ""))
+        cds2 <- DNAString(paste0(lapply(seq_along(gene_structure_i), function(i) {
+          as.character(subseq(genome2, start(gene_structure_i[i]), end(gene_structure_i[i])))
+        }), collapse = ""))
+        
+        p1 <- Biostrings::translate(cds1); p2 <- Biostrings::translate(cds2)
+        
+        pos2 <- which(unlist(strsplit(as.character(p1), "")) != unlist(strsplit(as.character(p2), "")))
+        if(length(pos2) == 0) {
+        pos2=ceiling((pos-gene_structure_i@start)/3)
+        pos2<-pos2[1]
+        ref2 <- unlist(strsplit(as.character(p1), ""))[pos2]
+        alt2 <- unlist(strsplit(as.character(p2), ""))[pos2]
+         paste0(mapply(seq_along(pos2), FUN = function(j) {
+          return(paste0("Synonymous:",toupper(g), ":", ref2[j], pos2[j], alt2[j]))
+        }), collapse = "; ")
+        } else {
+          ref2 <- unlist(strsplit(as.character(p1), ""))[pos2]
+          alt2 <- unlist(strsplit(as.character(p2), ""))[pos2]
+          paste0(mapply(seq_along(pos2), FUN = function(j) {
+            return(paste0(toupper(g), ":", ref2[j], pos2[j], alt2[j]))
+          }), collapse = "; ")
+        }
+      })
+      return(paste0(do.call(c, res), collapse = "; "))
+    }
+  }
+}
+
+
+
+mut_map<-lapply(unique(nnSub$nnSub),function(id){
+        AAsub1=Mut2AA(id = id, genome = genome, gene_structure = gene_struc)
+        AAsub2=Mut2AA(id = id, genome = genome, gene_structure = gene_struc_2)
+        return(data.frame(NAmut=id,AAsub1=AAsub1,AAsub2=AAsub2))
+  })%>%do.call(rbind,.)
+mut_map$AAsub2<-gsub("ORF1A","ORF1a",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("ORF1B","ORF1b",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("ORF3A","ORF3a",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("ORF7A","ORF7a",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("ORF7B","ORF7b",mut_map$AAsub2)
+mut_map$AAsub1<-gsub("ORF3A","ORF3a",mut_map$AAsub1)
+mut_map$AAsub1<-gsub("ORF7A","ORF7a",mut_map$AAsub1)
+mut_map$AAsub1<-gsub("ORF7B","ORF7b",mut_map$AAsub1)
+mut_map$Type<-"Non-Synonymous"
+mut_map$Type[grepl("^Synonymous",mut_map$AAsub1)]<-"Synonymous"
+mut_map$Type[grepl("inter",mut_map$AAsub1)]<-"Intergenic"
+
+mut_map$AAsub1<-gsub("Synonymous:","",mut_map$AAsub1)
+mut_map$AAsub1<-gsub("\\(|\\)","",mut_map$AAsub1)
+mut_map$AAsub1<-gsub("intergenic","",mut_map$AAsub1)
+mut_map$AAsub2<-gsub("\\(|\\)","",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("Synonymous:","",mut_map$AAsub2)
+mut_map$AAsub2<-gsub("intergenic","",mut_map$AAsub2)
+
+mut_map2<-merge(mut_map,nnSub,by.y="nnSub",by.x="NAmut",all.x=T)
+mut_map3<-merge(AASub,mut_map2,by.x=c("sample_id","AASub"),by.y=c("sample_id","AAsub2"),all=T)
+mut_map3$Type[is.na(mut_map3$Type)]<-"Non-Synonymous"
+mut_map3$AAsub1[is.na(mut_map3$AAsub1)]<-mut_map3$AASub[is.na(mut_map3$AAsub1)]
+cluster_assignments<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/mut_cluster_v1.rds")
+mut_map3$cluster<-cluster_assignments$cluster[match(mut_map3$AAsub1,cluster_assignments$AASub)]
+colnames(mut_map3)[1]<-"Name"
+
+write.xlsx(mut_map3[,c(1,3,2,4:6)],"../data/clinical_phenotype_analysis/MIL/prepeare/genotype.xlsx")
+```
+
+##data preprocess
+```{r}
+gene_struc <- openxlsx::read.xlsx("../data/SARS_CoV_2_reference/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc$gene[1:17]<-toupper(gene_struc$gene[1:17])
+gene_struc<-gene_struc[-12,]
+
+vep<-readRDS("/mnt/raid64/COVID19/Personal/lhkp/GISAID_250706/mut_prev/strainGV_vep.rds")
+vep$AAsub<-gsub("ORF7A","ORF7a",vep$AAsub)
+vep$AAsub<-gsub("ORF7B","ORF7b",vep$AAsub)
+vep$AAsub<-gsub("ORF3A","ORF3a",vep$AAsub)
+vep_phyloP<-aggregate(data=vep[,c(25,19)],phyloP~AAsub,max)
+vep_phastCons<-aggregate(data=vep[,c(25,18)],phastCons~AAsub,max)
+
+nc_res<- readRDS("../data/GISAID_260111/selection_coefficient/selection_nonsyn_observed.rds")
+
+  
+mut_pyro<-readRDS("../data/relative_fitness/pyr0/mutations_fit.rds")
+mut_pyro$mutation_v2<-gsub("STOP","*",mut_pyro$mutation_v2)
+
+evo_idx<-lapply(unique(gene_struc$gene),function(g){
+  tmp1<-fread(paste0("/mnt/raid62/Personal_data/linghukepan/04software/EVEscape/data/EVcoupling/output/",g,"_EVE/results/evol_indices/s200000/",g,"_EVE_20000_samples.csv"))
+  tmp1$mutations<-paste0(g,":",tmp1$mutations)
+  return(tmp1[,2:3])
+})%>%do.call(rbind,.)
+
+
+
+geno <- as.data.table(read.xlsx("../data/clinical_phenotype_analysis/MIL/prepeare/genotype.xlsx"))
+
+geno$phastCons<-vep_phastCons$phastCons[match(geno$AAsub1,vep_phastCons$AAsub)]
+geno2<-merge(geno,vep[,c(20,21,25)],by.x="AAsub1",by.y="AAsub",all.x=T)
+geno2$phyloP<-vep_phyloP$phyloP[match(geno2$AAsub1,vep_phyloP$AAsub)]
+
+geno2$selection_coefficient<-nc_res$`selection coefficient`[match(geno2$AAsub1,nc_res$AAsub)]
+geno2$relative_fitness<-mut_pyro$`R / R_A`[match(geno2$AAsub1,mut_pyro$mutation_v2)]
+geno2$evo_idx<-evo_idx$evol_indices[match(geno2$AAsub1,evo_idx$mutations)]
+
+cov2var_meta<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/Cov2Var/mutations_summary.txt")
+cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"]<-paste0(
+  substr(cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"],1,1),
+  as.numeric(gsub("[A-Z]","",cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"]))-4401,
+  substr(cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"],nchar(cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"]),nchar(cov2var_meta$`Protein mutation-1 letter`[cov2var_meta$`Gene name`=="ORF1ab_pp1ab"]))
+)
+cov2var_meta$AAsub<-paste0(cov2var_meta$`Gene name`,":",cov2var_meta$`Protein mutation-1 letter`)
+cov2var_meta$AAsub<-gsub("ORF1ab_pp1ab","ORF1b",cov2var_meta$AAsub)
+cov2var_meta$AAsub<-gsub("ORF1ab_pp1a","ORF1a",cov2var_meta$AAsub)
+cov2var_protFun<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/Cov2Var/mutation_induced_protein_function_changes.txt")
+cov2var_protSta<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/Cov2Var/mutation_induced_protein_stability_changes.txt")
+cov2var_protPhy<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/Cov2Var/mutation_effects_on_physicochemical_parameters.txt")
+cov2var_F<-merge(cov2var_protFun[,c(2,9)],cov2var_protPhy[,3:8],by="Mutation ID",all=T)
+cov2var_F<-merge(cov2var_F,cov2var_protSta[cov2var_protSta$`Condition type`=="Environment",c(2,9)],by="Mutation ID",all=T)
+cov2var_F<-merge(cov2var_F,cov2var_protSta[cov2var_protSta$`Condition type`=="Internal",c(2,9)],by="Mutation ID",all=T)
+colnames(cov2var_F)[c(2,8,9)]<-c("Protein_Func","delta_DDG_Env","delta_DDG_Int")
+cov2var_F$AAsub<-cov2var_meta$AAsub[match(cov2var_F$`Mutation ID`,cov2var_meta$`Mutation ID`)]
+geno2<-merge(geno2,cov2var_F[,-1],by.x="AASub",by.y="AAsub",all.x=T,allow.cartesian=TRUE)
+geno2<-unique(geno2)
+
+geno2<-geno2[!geno2$Type%in%c("Synonymous","Intergenic"),]
+colnames(geno2)[2:3]<-c("mutation_id","sample_id")
+
+pheno1 <- as.data.table(readRDS("../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds"))
+colnames(pheno1)[1]<-"sample_id"
+colnames(pheno1)<-gsub("\\.|\\-|\\/","_",colnames(pheno1))
+
+geno2<-geno2[geno2$sample_id%in%pheno1$sample_id,]
+geno2<-geno2[!is.na(geno2$cluster),]
+
+colnames(geno2)<-gsub(" ","_",colnames(geno2))
+length(unique(geno2$sample_id))#442
+
+pheno1<-pheno1[pheno1$sample_id%in%geno2$sample_id,]
+write.csv(pheno1[,c(-2:-5)],"../data/clinical_phenotype_analysis/MIL/prepeare/nor_pheno_by_Age_Gender_CCI.csv",col.names = T,row.names = F,sep=",",quote = F)
+write.csv(geno2[,c(-1)],"../data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv",col.names = T,row.names = F,sep=",",quote = F)
+
+geno2<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv")
+#TableS5
+colnames(geno2)[c(11:13)]<-c("R/R_A","EVEScape","Pathogenicity")
+tmp<-geno2[,c(1,2,6,9,7,8,13,19,20,10:12,14:18)]
+write.xlsx(tmp,"../table/TableS5_viral_mutation_features.xlsx")
+
+cor_res<-readRDS("../data/clinical_phenotype_analysis/Time_cef_CCI.rds")
+cor_res$trait<-gsub("\\.|\\-|\\/","_",cor_res$trait)
+cor_res_sig<-cor_res[cor_res$pvalue<0.05,]
+cor_res_sig$trait<-factor(cor_res_sig$trait,levels = c('TNF_a', 'IFN_a', 'IFN_y' ,setdiff(cor_res_sig$trait,c('TNF_a', 'IFN_a', 'IFN_y'))))
+cor_res_sig<-cor_res_sig[order(cor_res_sig$trait),]
+write.csv(cor_res_sig,"../data/clinical_phenotype_analysis/MIL/prepeare/time_coef_sig_trait.csv",col.names = T,row.names = F,quote = F)
+
+```
+
+## Robust test
+```{r}
+trait<-list.files("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_260714_parallel/",pattern = "_phase1_fit_metrics.csv")
+trait<-gsub("_phase1_fit_metrics.csv","",trait)
+
+ins_pheno_map <- read.xlsx("../data/clinical_phenotype_analysis/clinical_phenotype_ref.xlsx")
+ins_pheno_map$Severity.relationship[grepl('Unknow', ins_pheno_map$Severity.relationship)] <- "Unknown"
+ins_pheno_map$Severity.relationship[grepl('Positive', ins_pheno_map$Severity.relationship)] <- "Severe"
+ins_pheno_map$Severity.relationship[grepl('Negative', ins_pheno_map$Severity.relationship)] <- "Nonsevere"
+ins_pheno_map$Trait <- gsub(" ", "_", ins_pheno_map$Trait)
+ins_pheno_map$Trait <- gsub("-", "_", ins_pheno_map$Trait)
+
+p1_eval<-lapply(trait,function(t){
+  tmp1<-fread(paste0("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_260714_parallel/",t,"_phase1_fit_metrics.csv"))
+  tmp2<-melt(tmp1)
+  tmp2$trait=t
+  tmp2$resample<-rep(c(1:100),12)
+  return(tmp2)
+})%>%do.call(rbind,.)
+
+tmp<-p1_eval[p1_eval$variable=="Val_Pearson_R",-2:-3]
+write.xlsx(tmp,"../table/TableS6_MIL_Val_Pearson_R.xlsx")
+
+mean_val_trait<-aggregate(data=p1_eval[grepl("Val_Pearson_R",p1_eval$variable),],value~trait,mean)
+mean_val_trait<-mean_val_trait[order(mean_val_trait$value,decreasing = T),]
+summary(mean_val_trait$value)
+
+x <- mean_val_trait$value
+mean_x <- mean(x, na.rm = TRUE)
+se_x <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+ci95 <- mean_x + c(-1, 1) * qt(0.975, df = sum(!is.na(x)) - 1) * se_x #0.1515154 0.2296976
+
+#FigS2D
+p1 <- ggplot(mean_val_trait, aes(x = "", y = value)) +
+  geom_violin(fill = "white", color = "black", width = 0.8) +
+  geom_boxplot(width = 0.18, outlier.shape = NA, fill = "white", color = "grey40") +
+  geom_jitter(width = 0.08, size = 2, alpha = 0.7, color = "grey40") +
+  geom_segment(aes(x = 0.9, xend = 1.1, y = ci95[1], yend = ci95[1]), linetype = "dashed",inherit.aes = FALSE, color = "#E41A1C", linewidth = 0.6) +
+  geom_segment(aes(x = 0.9, xend = 1.1, y = ci95[2], yend = ci95[2]), linetype = "dashed",inherit.aes = FALSE, color = "#E41A1C", linewidth = 0.6) +
+  annotate("text", x = 1.18, y = ci95[2], label = "95% CI of mean correlation", color = "#E41A1C", hjust = 0, size = 4) +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  labs(x = "", y = "Mean correlation\nin 100 resampling tests")
+ggsave("../result/03clinical_phenotype_analysis/MIL/Val_mean_coef_boxplot_v1.pdf",p1,width = 3.5,height = 3.7)
+
+
+sum(mean_val_trait$value>0.2296976)#13
+
+target_traits <- mean_val_trait$trait[mean_val_trait$value > 0.2296976]
+sub_data <- p1_eval[p1_eval$trait %in% target_traits, ]
+
+plot_stats <- sub_data %>%
+  dplyr::filter(grepl("Val_Pearson_R", variable)) %>%
+  dplyr::group_by(trait) %>%
+  dplyr::summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    sd_val = sd(value, na.rm = TRUE),
+    n = n(),
+    se_val = sd_val / sqrt(n) 
+  ) %>%
+  dplyr::filter(mean_val > 0.2296976) %>%   
+  dplyr::arrange(desc(mean_val))
+
+plot_stats$group<-ins_pheno_map$Severity.relationship[match(plot_stats$trait,ins_pheno_map$Trait)]
+
+axis_labels <- plot_stats %>%
+  dplyr::mutate(label = dplyr::case_when(group == "Severe" ~ paste0("<span style='color:#E41A1C'>", trait, "</span>"),
+                                         group == "Nonsevere" ~ paste0("<span style='color:#377EB8'>", trait, "</span>"),
+                                         TRUE ~ paste0("<span style='color:#999999'>", trait, "</span>"))) %>%
+  dplyr::pull(label)
+
+names(axis_labels) <- plot_stats$trait
+
+#Fig2E
+p1<-ggplot(plot_stats, aes(reorder(trait, -mean_val), mean_val, fill = group)) +
+  geom_col(width = 0.6, alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_val - se_val, ymax = mean_val + se_val), width = 0.2, color = "black") +
+  geom_hline(yintercept = 0.2296976, linetype = "dashed", color = "grey") +
+  scale_x_discrete(labels = axis_labels) +
+  scale_y_continuous(breaks = c(0,0.1,0.2,0.3,0.4,0.5))+
+  scale_fill_manual(values = c("Severe" = "#E41A1C",
+                               "Nonsevere" = "#377EB8",
+                               "Unknown" = "#999999")) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "", y = "Mean correlation of\n predicted vs actual")
+ggsave("../result/03clinical_phenotype_analysis/MIL/Val_cor_barplot.pdf",p1,width = 6,height = 3.7)
+```
+
+## Attention map
+```{r}
+cluster_assignments<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/mut_cluster_v1.rds")
+mut_attn<-lapply(target_traits,function(t){
+  tmp1<-fread(paste0("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_260714_parallel/Result_",t,"_Importance.csv"))
+  tmp1$cluster<-cluster_assignments$cluster[match(tmp1$mutation_id,cluster_assignments$AASub)]
+    tmp1$Rank<seq(1:nrow(tmp1))
+    tmp1$group1<-"Other"
+    tmp1$group1[tmp1$mutation_id%in%c("NSP1:S135R","NSP13:R392C","E:T9I","E:T11A","NSP3:T24I")]<-"Ins mut"
+    l1=tmp1$mutation_id[1:5]
+    l2=tmp1[order(tmp1$snr,decreasing=T),]$mutation_id[1:5]
+    tmp1$label=""
+    tmp1$label[tmp1$mutation_id%in%c("NSP1:S135R","NSP13:R392C","E:T9I","E:T11A","NSP3:T24I",l1,l2)]<-tmp1$mutation_id[tmp1$mutation_id%in%c("NSP1:S135R","NSP13:R392C","E:T9I","E:T11A","NSP3:T24I",l1,l2)]
+    tmp1$trait=t
+  return(tmp1)
+})%>%do.call(rbind,.)
+saveRDS(mut_attn,"../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+
+
+mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+tmp<-mut_attn[,c(11,1,8,2)]
+write.xlsx(tmp,"../table/TableS7_MIL_attention_map.xlsx")
+
+mut_attn2<-mut_attn
+mut_attn_df<-dcast(data=mut_attn2[,c(1,11,2)],trait~mutation_id)%>%as.data.frame()
+mut_Z_df<-dcast(data=mut_attn2[,c(1,11,4)],trait~mutation_id)%>%as.data.frame()
+
+
+rownames(mut_attn_df)<-mut_attn_df$trait
+mut_attn_df<-mut_attn_df[,-1]
+mut_attn_df[is.na(mut_attn_df)]<-0
+rownames(mut_Z_df)<-mut_Z_df$trait
+mut_Z_df<-mut_Z_df[,-1]
+mut_Z_df[is.na(mut_Z_df)]<-0
+col_fun = colorRamp2(c(-4, 0, 4), c("#2166ac", "#f7f7f7", "#b2182b"))
+
+mut_anno <- data.frame(mutation_id=colnames(mut_attn_df))
+mut_anno$protein<-str_split_fixed(mut_anno$mutation_id,":",2)[,1]
+mut_anno$protein[grepl("NSP",mut_anno$protein)]<-"ORF1ab"
+rownames(mut_anno) <- mut_anno$mutation_id
+mut_anno <- mut_anno[colnames(mut_attn_df), ]
+
+protein_color<-brewer.pal(9,name = "Set3")
+protein_color[c(2:6,8,9)]<-c("#EA5514","#6A3D9A","#F0E442","#A6A61E","#9C6B4E","#C65C85","#8A8A8A")
+names(protein_color)<-c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+
+
+ha <- HeatmapAnnotation("Viral gene" = mut_anno$protein, col = list("Viral gene" =protein_color))
+
+traits <- rownames(mut_attn_df)
+
+
+row_groups <- rep("Others", length(traits))
+row_groups[traits %in% c(
+  "TNF_a", "IL_6"
+)] <- "Cytokine"
+
+## Immune Cells
+row_groups[traits %in% c(
+  "CD8+", "B_cell", "Lymphocyte",
+  "EOS", "EOS_%",
+  "BASO", "BASO_%"
+)] <- "Immune cells"
+
+## Blood routine
+row_groups[traits %in% c(
+  "PCV", "RBC_Hgb","ESR"
+)] <- "Blood routine"
+
+## Blood chemistry
+row_groups[traits %in% c(
+  "TP", "GLU",
+  "HBDH", "LDH",
+  "Na", "Mg", "HCO3"
+)] <- "Blood chemistry"
+
+row_groups <- factor(row_groups, levels = c("Cytokine","Blood routine","Blood chemistry",  "Immune cells",  "Others"))
+
+col_groups<-colnames(mut_attn_df)
+col_groups<-str_split_fixed(col_groups,":",2)[,1]
+col_groups[grepl("NSP",col_groups)]<-"ORF1ab"
+col_groups<-factor(col_groups,levels = c("S","ORF1ab","M","N","E","ORF3a","ORF7a","ORF7b","ORF8"))
+
+#FigS2E  
+cairo_pdf("../result/03clinical_phenotype_analysis/MIL/atten_Z_heatmap.pdf",width = 8,height = 4.5)
+Heatmap(t(scale(t(as.matrix(mut_attn_df)))), 
+        name = "Scaled attention",
+        top_annotation = ha,
+        # bottom_annotation = bottom_ha,   
+        show_column_names = FALSE,         
+        show_row_names = TRUE, 
+        col = col_fun,
+        clustering_method_columns = "ward.D2",
+        clustering_method_rows = "ward.D2",
+        row_names_side = "right",
+        row_split = row_groups,       
+        cluster_row_slices = FALSE,   
+        row_title_rot = 0,            
+        row_gap = unit(3, "mm"),      
+        
+        border = TRUE
+)
+dev.off()
+
+mut_attn_mean_df <- mut_attn2 %>%
+  dplyr::filter(!is.na(trait), !is.na(mutation_id), !is.na(mean_attention)) %>%
+  dplyr::group_by(trait) %>%
+  dplyr::mutate(trait_mean_attention = mean(mean_attention, na.rm = TRUE), above_mean = mean_attention > trait_mean_attention) %>%
+  dplyr::ungroup()
+
+mut_above_mean <- mut_attn_mean_df %>%
+  dplyr::filter(above_mean) %>%
+  dplyr::arrange(trait, desc(mean_attention))
+length(unique(mut_above_mean$mutation_id))#196
+
+cluster_assignment2<-readRDS("../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+cluster_assignment2_sig<-cluster_assignment2[cluster_assignment2$`selection coefficient`>0.01&cluster_assignment2$`R / R_A`>1&cluster_assignment2$`mean/stddev`>5,]
+cluster_assignment2_sig<-cluster_assignment2_sig[!is.na(cluster_assignment2_sig$AASub),]
+mut_attn_mat <- t(scale(t(as.matrix(mut_attn_df))))
+mut_attn_mat[is.na(mut_attn_mat)] <- 0
+
+nsp_mut <- colnames(mut_attn_df)[grepl("^NSP", colnames(mut_attn_df))]
+nsp_mut<-nsp_mut[nsp_mut%in%cluster_assignment2_sig$AASub[cluster_assignment2_sig$group=="Stable"]]
+nsp_mut<-nsp_mut[nsp_mut%in%mut_above_mean$mutation_id]
+nsp_anno <- data.frame(mutation_id = nsp_mut)
+nsp_anno$nsp <- str_split_fixed(nsp_anno$mutation_id, ":", 2)[,1]
+rownames(nsp_anno) <- nsp_anno$mutation_id
+nsp_levels <- paste0("NSP", 1:16)
+nsp_anno$nsp <- factor(nsp_anno$nsp, levels = nsp_levels)
+nsp_color <- colorRampPalette(brewer.pal(12, "Set3"))(16)
+names(nsp_color) <- nsp_levels
+nsp_ha <- HeatmapAnnotation(NSP = nsp_anno$nsp, col = list(NSP = nsp_color))
+
+nsp_mat <- mut_attn_mat[, nsp_mut, drop = FALSE]
+nsp_col_groups <- factor(nsp_anno$nsp, levels = nsp_levels)
+
+above_mean_mut <- mut_attn_mean_df %>%
+  dplyr::filter(above_mean%in%c(TRUE,"TRUE",1)) %>%
+  dplyr::pull(mutation_id) %>%
+  unique()
+
+star_df <- mut_attn_mean_df %>%
+  dplyr::filter(above_mean%in%c(TRUE,"TRUE",1),trait%in%rownames(nsp_mat),mutation_id%in%colnames(nsp_mat)) %>%
+  dplyr::select(trait,mutation_id) %>%
+  dplyr::distinct()
+
+
+star_mat <- matrix("",nrow=nrow(nsp_mat),ncol=ncol(nsp_mat),dimnames=dimnames(nsp_mat))
+
+star_index <- cbind(match(star_df$trait,rownames(star_mat)),match(star_df$mutation_id,colnames(star_mat)))
+star_index <- star_index[stats::complete.cases(star_index),,drop=FALSE]
+star_mat[star_index] <- "*"
+
+col_fun = colorRamp2(c(-2, 0, 4), c("#2166ac", "#f7f7f7", "#b2182b"))
+cairo_pdf("../result/03clinical_phenotype_analysis/MIL/atten_Z_heatmap_stable_NSP_high_mutations.pdf", width = 6, height = 4.5)
+Heatmap(nsp_mat, name = "Scaled attention", show_column_names = TRUE, column_names_gp = gpar(fontsize = 12), column_names_rot = 90, show_row_names = TRUE, col = col_fun,clustering_method_columns="ward.D2",clustering_method_rows="ward.D2",row_names_side="right",row_split=row_groups,cluster_row_slices=FALSE,row_title_rot=0,row_gap=grid::unit(3,"mm"),cluster_column_slices=FALSE,border=TRUE,cell_fun=function(j,i,x,y,width,height,fill){if(star_mat[i,j]=="*"){star_color <- "black";grid::grid.text("*",x,y,gp=grid::gpar(fontsize=11,fontface="bold",col=star_color))}})
+dev.off()
+
+
+
+
+mut_attn2$protein<-str_split_fixed(mut_attn2$mutation_id,":",2)[,1]
+mut_attn2$protein[grepl("NSP",mut_attn2$protein)]<-"ORF1ab"
+protein_levels <- c("ORF1ab","S",  "N", "M", "E",
+                    "ORF3a", "ORF7a", "ORF7b", "ORF8")
+ins_pheno_map <- read.xlsx("../data/clinical_phenotype_analysis/clinical_phenotype_ref.xlsx")
+ins_pheno_map$Severity.relationship[grepl('Unknow', ins_pheno_map$Severity.relationship)] <- "Unknown"
+ins_pheno_map$Severity.relationship[grepl('Positive', ins_pheno_map$Severity.relationship)] <- "Severe"
+ins_pheno_map$Severity.relationship[grepl('Negative', ins_pheno_map$Severity.relationship)] <- "Nonsevere"
+ins_pheno_map$Trait <- gsub(" ", "_", ins_pheno_map$Trait)
+ins_pheno_map$Trait <- gsub("-", "_", ins_pheno_map$Trait)
+
+
+mut_attn2$group2<-ins_pheno_map$Severity.relationship[match(mut_attn2$trait,ins_pheno_map$Trait)]
+stack_levels <- c("S", "N", "M", "E", "ORF3a", "ORF7a", "ORF7b", "ORF8", "ORF1ab")
+
+top_n_mut <- 20
+
+top_df <- mut_attn2 %>%
+  dplyr::filter(!is.na(trait), !is.na(protein), !is.na(mean_attention)) %>%
+  dplyr::mutate(protein = factor(protein, levels = protein_levels)) %>%
+  dplyr::group_by(trait) %>%
+  dplyr::slice_max(mean_attention, n = top_n_mut, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+plot_df <- top_df %>%
+  dplyr::count(trait, protein, group2, .drop = FALSE) %>%
+  dplyr::group_by(trait) %>%
+  dplyr::mutate(freq = n / top_n_mut) %>%
+  dplyr::ungroup()
+
+plot_df$trait <- gsub("RBC_Hgb", "HGB", plot_df$trait)
+
+dominant_df <- plot_df %>%
+  dplyr::group_by(trait) %>%
+  dplyr::arrange(desc(freq), .by_group = TRUE) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(trait, dominant_protein = protein, dominant_freq = freq, group2)
+
+trait_order <- dominant_df %>%
+  dplyr::mutate(dominant_protein = factor(dominant_protein, levels = protein_levels)) %>%
+  dplyr::arrange(dominant_protein, desc(dominant_freq)) %>%
+  dplyr::pull(trait)
+
+plot_df <- plot_df %>%
+  dplyr::mutate(trait = factor(trait, levels = trait_order),
+                protein = factor(as.character(protein), levels = stack_levels))
+
+axis_label_df <- dominant_df %>%
+  dplyr::mutate(trait = gsub("RBC_Hgb", "HGB", trait),
+                trait_label = dplyr::case_when(
+                  group2 == "Severe related trait" ~ paste0("<span style='color:#E41A1C'>", trait, "</span>"),
+                  group2 == "Nonsevere related trait" ~ paste0("<span style='color:#377EB8'>", trait, "</span>"),
+                  TRUE ~ paste0("<span style='color:grey40'>", trait, "</span>")
+                ))
+
+axis_labels <- axis_label_df$trait_label
+names(axis_labels) <- axis_label_df$trait
+
+protein_color <- brewer.pal(9, name = "Set3")
+protein_color[2] <- "#EA5514"
+names(protein_color) <- c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+
+
+
+
+ make_protein_order_plot <- function(plot_df,sort_protein){
+  trait_order_tmp <- plot_df %>%
+    dplyr::filter(as.character(protein) == sort_protein) %>%
+    dplyr::arrange(desc(freq)) %>%
+    dplyr::pull(trait)
+
+  plot_df_tmp <- plot_df %>%
+    dplyr::mutate(trait = factor(trait, levels = trait_order_tmp), protein = factor(as.character(protein), levels = stack_levels))
+
+  p_tmp <- ggplot(plot_df_tmp, aes(x = trait, y = freq, fill = protein)) +
+    geom_col(width = 0.8, position = position_stack(reverse = TRUE)) +
+    scale_fill_manual(values = protein_color[stack_levels], breaks = stack_levels, drop = FALSE) +
+    scale_x_discrete(labels = axis_labels) +
+    scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1), expand = c(0, 0)) +
+    labs(x = NULL, y = "Proportion of top mutations", fill = "Protein", title = paste0("Ordered by ", sort_protein, " proportion")) +
+    theme_classic(base_size = 14) +
+    theme(axis.text.x = ggtext::element_markdown(angle = 60, hjust = 1, vjust = 1), legend.position = "right")
+
+  return(p_tmp)
+}
+
+p_S <- make_protein_order_plot(plot_df,"S")
+ggsave("../result/03clinical_phenotype_analysis/MIL/top20_attn_mut_protein_orderbyS.pdf",p_S,width = 6.5,height = 3.7)
+p_ORF1ab <- make_protein_order_plot(plot_df,"ORF1ab")
+
+
+#Fig2F
+mut_attn_mean_df$group2<-ins_pheno_map$Severity.relationship[match(mut_attn_mean_df$trait,ins_pheno_map$Trait)]
+mut_attn_mean_df$protein<-str_split_fixed(mut_attn_mean_df$mutation_id,":",2)[,1]
+mut_attn_mean_df$protein[grepl("NSP",mut_attn_mean_df$protein)]<-"ORF1ab"
+
+
+
+above_mean_df <- mut_attn_mean_df %>%
+  dplyr::filter(above_mean,!is.na(protein),!is.na(mean_attention)) %>%
+  dplyr::mutate(protein=factor(protein,levels=stack_levels))
+
+
+trait_above_mean_n <- above_mean_df %>%
+  dplyr::count(trait,name="n_above_mean")
+
+
+plot_df_mean <- above_mean_df %>%
+  dplyr::count(trait,protein,group2,.drop=FALSE) %>%
+  dplyr::left_join(trait_above_mean_n,by="trait") %>%
+  dplyr::group_by(trait) %>%
+  dplyr::mutate(freq=n/n_above_mean) %>%
+  dplyr::ungroup()
+
+plot_df_mean$trait <- gsub("RBC_Hgb","HGB",plot_df_mean$trait)
+
+length(unique(above_mean_df$mutation_id))#196
+table(unique(above_mean_df[,c(1,15)])$protein)
+
+p_S_mean <- make_protein_order_plot(plot_df_mean,"S")
+
+ggsave("../result/03clinical_phenotype_analysis/MIL/top20_attn_mut_protein_orderbyS_mean.pdf",p_S_mean,width = 6.5,height = 3.7)
+
+
+
+#FigS2G
+mut_prev_variant<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/filter_mut_prev_across_major_variants.rds")
+plot_df1<-dcast(data=mut_prev_variant[,c(1,3,5)],AASub~pango_lineage2)
+plot_df1[is.na(plot_df1)]<-0
+plot_df1<-as.data.frame(plot_df1)
+rownames(plot_df1)<-plot_df1$AASub
+col_fun = colorRamp2(c(0, 0.5, 1), c("#2166ac", "#f7f7f7", "#b2182b")) 
+plot_df1_nsp_stable<-plot_df1[plot_df1$AASub%in%intersect(nsp_mut,mut_above_mean$mutation_id[mut_above_mean$trait=="TNF_a"]),]
+plot_df1_nsp_stable<-plot_df1_nsp_stable[,c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]
+
+
+cairo_pdf("../result/03clinical_phenotype_analysis/MIL/Stable_high_mutations_frequency_heatmap.pdf",width = 8,height = 4)
+Heatmap(
+  as.matrix((plot_df1_nsp_stable)), 
+  name = "Frequency",
+  col = col_fun,
+  cluster_columns = FALSE, 
+  column_title = NULL,
+  cluster_rows = TRUE, 
+  show_row_names = TRUE,
+  row_names_side = "right",
+
+  show_column_names = TRUE,
+  rect_gp = gpar(col = "NA")
+
+)
+dev.off()
+
+
+```
+
+
+###TNF-α
+```{r}
+mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+mut_attn2<-mut_attn
+mut_attn2$protein<-str_split_fixed(mut_attn2$mutation_id,":",2)[,1]
+mut_attn2$protein[grepl("NSP",mut_attn2$protein)]<-"ORF1ab"
+
+
+
+mut_attn2_TNF_NSP<-mut_attn2[mut_attn2$protein=="ORF1ab"&mut_attn2$trait=="TNF_a",]
+cluster_assignments<-readRDS("../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+
+highfit_mut=intersect(cluster_assignments$AASub[cluster_assignments$`selection coefficient`>0.01],
+                                   cluster_assignments$AASub[cluster_assignments$`R / R_A`>1&cluster_assignments$`mean/stddev`>5])
+highfit_mut<-highfit_mut[!is.na(highfit_mut)]
+highfit_mut_nsp<-highfit_mut[grepl("NSP",highfit_mut)]
+
+
+mut_attn2_TNF_NSP2<-mut_attn2_TNF_NSP[mut_attn2_TNF_NSP$mutation_id%in%highfit_mut_nsp,]
+mut_attn2_TNF_NSP2<-mut_attn2_TNF_NSP2[order(mut_attn2_TNF_NSP2$mean_attention,decreasing = T),]
+
+
+mut_attn2_TNF<-mut_attn2[mut_attn2$trait=="TNF_a",]
+mut_attn2_TNF<-mut_attn2_TNF[order(mut_attn2_TNF$mean_attention,decreasing = T),]
+mut_attn2_TNF$od<-1:61
+mut_attn2_TNF$group2<-"Experimentally characterized"
+mut_attn2_TNF$group2[mut_attn2_TNF$mutation_id%in%c("NSP1:S135R","NSP13:R392C","NSP4:T327I","NSP3:T24I","NSP1:K47R","NSP14:A394V","NSP6:T77A","NSP2:A510V")]<-"Uncharacterized"
+mut_attn2_TNF$group3<-ifelse(mut_attn2_TNF$cluster%in%paste0("Cluster",c(3,4,8,12)),"stable","spordic")
+
+protein_color<-brewer.pal(9,name = "Set3")
+protein_color[2]<-"#EA5514"
+names(protein_color)<-c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+
+mean(mut_attn2_TNF$mean_attention)#1.013624
+
+#FigS2F
+p<-ggplot(mut_attn2_TNF,aes(x=od,y= mean_attention,color=protein,shape=group3))+
+  geom_point()+
+  theme_classic(base_size = 16)+
+  geom_hline(yintercept = 1.01,linetype="dashed",color="grey")+
+  scale_color_manual(values =protein_color)+
+  geom_text_repel(data=mut_attn2_TNF[mut_attn2_TNF$mutation_id%in%mut_attn2_TNF_NSP2$mutation_id,],aes(label=mutation_id),nudge_x = 0.02,nudge_y = 0.02,max.overlaps = Inf)+
+  labs(x="",y="Attention score in TNF-α",color="",shape="")
+ggsave("../result/03clinical_phenotype_analysis/MIL/TNF_a_score_all_Nsp.pdf",p,width = 6,height = 4)
+
+
+```
+
+
+
+###Nsp mut feature plot
+```{r}
+geno2<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv")
+cluster_assignments<-readRDS("../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+mut_attn<-mut_attn[mut_attn$cluster!="Cluster1",]
+mut_attn_TNF<-mut_attn[mut_attn$trait=="TNF_a",]
+mut_attn_TNF<-mut_attn_TNF[grepl("^NSP",mut_attn_TNF$mutation_id),]
+
+cluster_assignments_ins<-cluster_assignments[cluster_assignments$AASub%in%mut_attn_TNF$mutation_id&cluster_assignments$cluster!="Cluster1",]
+cluster_assignments_ins$attn_TNF<-mut_attn_TNF$mean_attention[match(cluster_assignments_ins$AASub,mut_attn_TNF$mutation_id)]
+
+dnds<-readRDS("/mnt/raid64/COVID19/Personal/lhkp/GISAID_250706/dN_dS/dNdS_omicron.rds")
+dnds$Protein<-gsub("nsp","NSP",dnds$Protein)
+cluster_assignments_ins$dN_dS<-dnds$dN_dS_ratio[match(cluster_assignments_ins$protein,dnds$Protein)]
+
+
+cluster_assignments_ins<-cluster_assignments_ins[(cluster_assignments_ins$`R / R_A`>1)&(cluster_assignments_ins$`mean/stddev`>5)&(cluster_assignments_ins$`selection coefficient`>0.01),]
+
+
+
+tmp<-merge(cluster_assignments_ins,geno2[,c(1,6:20)],by.x="AASub",by.y="mutation_id",all.x=T)
+tmp<-unique(tmp[,c(-8:-11,-13:-14,-16:-17,-24,-25)])
+colnames(tmp)[c(7,16,17)]<-c("Z-score","EVEscape","Pathogenicity")
+tmp<-tmp[order(tmp$attn_TNF,decreasing = T),]
+tmp<-tmp[,c(1:4,12,15,11,8,9,16,13,14,17,23,24)]
+write.xlsx(tmp,"../table/TableS8_Nsp_mut_attention_features.xlsx")
+
+
+#Fig2H
+mut_df<-tmp
+feature_order <- c(
+  "R / R_A",
+  "selection coefficient",
+    "EVEscape",
+  "dN_dS",
+  "phastCons",
+  "phyloP",
+  "SIFT_Probability",
+  "PROVEAN_Score",
+  "Pathogenicity",
+  "delta_DDG_Env",
+  "delta_DDG_Int"
+)
+
+feature_order <- intersect(feature_order, colnames(mut_df))
+
+plot_df <- mut_df %>%
+  dplyr::select(AASub, dplyr::all_of(feature_order)) %>%
+  dplyr::mutate(dplyr::across(-AASub, as.numeric)) %>%
+  dplyr::mutate(
+    SIFT_Probability = -SIFT_Probability,
+    PROVEAN_Score = -PROVEAN_Score,
+    delta_DDG_Env = abs(delta_DDG_Env),
+    delta_DDG_Int = abs(delta_DDG_Int)
+  )
+
+feature_label <- c(
+  "R / R_A" = "Relative fitness",
+  "selection coefficient" = "Selection coefficient",
+    "EVEscape" = "EVEscape",
+  "dN_dS" = "dN/dS",
+  "phastCons" = "PhastCons",
+  "phyloP" = "PhyloP",
+  "SIFT_Probability" = "SIFT impact",
+  "PROVEAN_Score" = "PROVEAN impact",
+  "Pathogenicity" = "Pathogenicity",
+  "delta_DDG_Env" = "|ΔΔG| Env",
+  "delta_DDG_Int" = "|ΔΔG| Int"
+)
+
+feature_group <- c(
+  "R / R_A" = "Evolutionary effects",
+  "selection coefficient" = "Evolutionary effects",
+  "EVEscape" = "Evolutionary effects",
+  "dN_dS" = "Evolutionary effects",
+  "phastCons" = "Conservation",
+  "phyloP" = "Conservation",
+  "SIFT_Probability" = "Functional impact",
+  "PROVEAN_Score" = "Functional impact",
+  "Pathogenicity" = "Functional impact",
+  "delta_DDG_Env" = "Protein stability",
+  "delta_DDG_Int" = "Protein stability"
+)
+feature_group_df <- data.frame(
+  feature = names(feature_group),
+  feature_group = unname(feature_group),
+  row.names = NULL
+)
+
+heat_mat <- plot_df[,-1] %>%as.matrix()
+
+  
+
+heat_mat <- apply(heat_mat, 2, function(x) {
+  if (all(is.na(x)) || stats::sd(x, na.rm = TRUE) == 0) {
+    rep(0, length(x))
+  } else {
+    as.numeric(scale(x))
+  }
+})
+
+rownames(heat_mat) <- plot_df$AASub
+colnames(heat_mat) <- unname(feature_label[colnames(heat_mat)])
+heat_mat[is.na(heat_mat)] <- 0
+# heat_mat[heat_mat > 2.5] <- 2.5
+# heat_mat[heat_mat < -2.5] <- -2.5
+
+
+heat_col <- circlize::colorRamp2(
+  c(-2.5, 0, 2.5),
+  c("#2166ac", "#f7f7f7", "#b2182b")
+)
+
+cairo_pdf("../result/03clinical_phenotype_analysis/MIL/ins_Nsp_mut_feature_heatmap.pdf",width = 7.5,height = 5)
+ComplexHeatmap::Heatmap(
+  t(heat_mat),
+  col = heat_col,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  row_names_side = "right",
+  show_column_dend = FALSE,
+  show_row_dend = FALSE,
+  cluster_row_slices=FALSE,
+  row_title_rot=0,
+  row_gap=grid::unit(3,"mm"),
+  cluster_column_slices=FALSE,
+  row_split = feature_group_df$feature_group,
+  column_names_rot = 90,
+  column_names_gp = grid::gpar(fontsize = 9),
+  rect_gp = grid::gpar(col = "white", lwd = 0.3),
+  border = TRUE,
+  heatmap_legend_param = list(
+    title = "Scaled feature"
+  )
+)
+dev.off()
+```
+
+##cor plot
+```{r}
+result_dir <- "/mnt/raid66/Personal_data/linghukepan/03proj/06COVID19/upload_version1/data/clinical_phenotype_analysis/MIL/train/multi_traits_results_260714_parallel"
+prediction_dir <- file.path(result_dir,"predictions")
+
+trait <- list.files(result_dir,pattern="_phase1_fit_metrics\\.csv$") %>%
+  gsub("_phase1_fit_metrics\\.csv$","",.)
+
+pred_res <- lapply(trait,function(t){
+  tmp1 <- data.table::fread(file.path(prediction_dir,paste0(t,"_phase1_predictions.csv")))
+  if(!"trait"%in%colnames(tmp1)) tmp1[,trait:=t]
+  tmp1
+}) %>%
+  data.table::rbindlist(fill=TRUE)
+
+pred_res <- pred_res %>%
+  dplyr::filter(dataset=="Val",!is.na(y_true),!is.na(y_pred)) %>%
+  dplyr::mutate(trait=as.character(trait),sample_id=as.character(sample_id))
+
+## 所有run合并后，各trait的相关性统计
+cor_all_run <- pred_res %>%
+  dplyr::group_by(trait) %>%
+  dplyr::summarise(n=n(),n_sample=dplyr::n_distinct(sample_id),pearson_r=cor(y_true,y_pred,method="pearson",use="complete.obs"),pearson_p=cor.test(y_true,y_pred,method="pearson")$p.value,.groups="drop") %>%
+  dplyr::arrange(dplyr::desc(pearson_r))
+
+## 按相关系数排序trait
+pred_res <- pred_res %>%
+  dplyr::mutate(trait=factor(trait,levels=cor_all_run$trait))
+
+## 所有bootstrap run的预测值与真实值
+p_all_run <- ggplot2::ggplot(pred_res,ggplot2::aes(x=y_true,y=y_pred))+
+  ggplot2::geom_abline(slope=1,intercept=0,linetype=2,color="grey60",linewidth=0.5)+
+  ggplot2::geom_point(size=0.8,alpha=0.12)+
+  ggplot2::geom_smooth(method="lm",formula=y~x,se=FALSE,linewidth=0.8)+
+  ggpubr::stat_cor(method="pearson",aes(label=after_stat(paste(r.label,p.label,sep="~~~"))),label.x.npc="left",label.y.npc="top",size=3)+
+  ggplot2::facet_wrap(~trait,scales="free",ncol=5)+
+  ggplot2::labs(x="Actual phenotype value",y="Predicted phenotype value",title="Prediction performance across all bootstrap runs")+
+  ggplot2::theme_classic(base_size=12)+
+  ggplot2::theme(strip.background=ggplot2::element_rect(fill="grey95",color="grey70"),strip.text=ggplot2::element_text(face="bold"),plot.title=ggplot2::element_text(hjust=0.5,face="bold"))
+
+p_all_run
+
+
+p_all_run_tnf <- ggplot2::ggplot(pred_res[pred_res$trait=="TNF_a",],ggplot2::aes(x=y_true,y=y_pred))+
+  ggplot2::geom_point(size=0.8,alpha=0.12)+
+  ggplot2::geom_smooth(method="lm",formula=y~x,se=FALSE,linewidth=0.8)+
+  ggpubr::stat_cor(method="pearson",aes(label=after_stat(paste(r.label,p.label,sep="~~~"))),label.x.npc="left",label.y.npc="top",size=3)+
+  ggplot2::labs(x="Actual value",y="Predicted value")+
+  ggplot2::theme_classic(base_size=12)+
+  ggplot2::theme(strip.background=ggplot2::element_rect(fill="grey95",color="grey70"),strip.text=ggplot2::element_text(face="bold"),plot.title=ggplot2::element_text(hjust=0.5,face="bold"))
+
+
+p_all_run_tnf <-ggplot2::ggplot(pred_res[pred_res$trait=="TNF_a",],ggplot2::aes(x=y_true,y=y_pred))+
+  ggplot2::geom_point(ggplot2::aes(group=run_index),size=0.7,alpha=0.08,color="#377EB8")+
+  ggplot2::geom_smooth(ggplot2::aes(group=run_index),method="lm",formula=y~x,se=FALSE,color="#9FC5E8",linewidth=0.45,alpha=0.35)+
+  ggplot2::geom_smooth(ggplot2::aes(group=trait),method="lm",formula=y~x,se=TRUE,color="#1F4E79",fill="#9FC5E8",linewidth=1.5,alpha=0.18)+
+  ggpubr::stat_cor(method="pearson",ggplot2::aes(label=after_stat(paste(r.label,p.label,sep="~~~"))),label.x.npc="left",label.y.npc="top",size=3)+
+  ggplot2::labs(x="Actual value",y="Predicted value")+
+  ggplot2::theme_classic(base_size=12)+
+  ggplot2::theme(strip.background=ggplot2::element_rect(fill="grey95",color="grey70"),strip.text=ggplot2::element_text(face="bold"),plot.title=ggplot2::element_text(hjust=0.5,face="bold"))
+
+
+## 对每个sample在不同run中的预测值取均值
+pred_res_mean <- pred_res %>%
+  dplyr::mutate(trait=as.character(trait)) %>%
+  dplyr::group_by(sample_id,trait) %>%
+  dplyr::summarise(y_true=mean(y_true,na.rm=TRUE),y_pred_mean=mean(y_pred,na.rm=TRUE),y_pred_sd=sd(y_pred,na.rm=TRUE),n_run=dplyr::n_distinct(run_index),.groups="drop")
+
+## 不同run均值后的各trait相关性
+cor_mean_run <- pred_res_mean %>%
+  dplyr::group_by(trait) %>%
+  dplyr::summarise(n_sample=n(),pearson_r=cor(y_true,y_pred_mean,method="pearson",use="complete.obs"),pearson_p=cor.test(y_true,y_pred_mean,method="pearson")$p.value,rmse=sqrt(mean((y_true-y_pred_mean)^2,na.rm=TRUE)),mae=mean(abs(y_true-y_pred_mean),na.rm=TRUE),.groups="drop") %>%
+  dplyr::arrange(dplyr::desc(pearson_r))
+
+## 按均值预测的相关系数重新排序
+pred_res_mean <- pred_res_mean %>%
+  dplyr::mutate(trait=factor(trait,levels=cor_mean_run$trait))
+
+## 不同run均值的预测值与真实值
+p_mean_run <- ggplot2::ggplot(pred_res_mean,ggplot2::aes(x=y_true,y=y_pred_mean))+
+  ggplot2::geom_abline(slope=1,intercept=0,linetype=2,color="grey60",linewidth=0.5)+
+  ggplot2::geom_point(size=1.5,alpha=0.65)+
+  ggplot2::geom_smooth(method="lm",formula=y~x,se=TRUE,linewidth=0.9,alpha=0.15)+
+  ggpubr::stat_cor(method="pearson",aes(label=after_stat(paste(r.label,p.label,sep="~~~"))),label.x.npc="left",label.y.npc="top",size=3)+
+  ggplot2::facet_wrap(~trait,scales="free",ncol=5)+
+  ggplot2::labs(x="Actual phenotype value",y="Mean predicted phenotype value")+
+  ggplot2::theme_classic(base_size=12)+
+  ggplot2::theme(strip.background=ggplot2::element_rect(fill="grey95",color="grey70"),strip.text=ggplot2::element_text(face="bold"),plot.title=ggplot2::element_text(hjust=0.5,face="bold"))
+
+p_mean_run
+
+
+p_mean_run_tnf <- ggplot2::ggplot(pred_res_mean[pred_res_mean$trait=="TNF_a",],ggplot2::aes(x=y_true,y=y_pred_mean))+
+  ggplot2::geom_point(size=1.5,alpha=0.65)+
+  ggplot2::geom_smooth(method="lm",formula=y~x,se=TRUE,linewidth=0.9,alpha=0.15)+
+  ggpubr::stat_cor(method="pearson",aes(label=after_stat(paste(r.label,p.label,sep="~~~"))),label.x.npc="left",label.y.npc="top",size=3)+
+  ggplot2::labs(x="Actual value",y="Mean predicted value")+
+  ggplot2::theme_classic(base_size=12)+
+  ggplot2::theme(strip.background=ggplot2::element_rect(fill="grey95",color="grey70"),strip.text=ggplot2::element_text(face="bold"),plot.title=ggplot2::element_text(hjust=0.5,face="bold"))
+
+
+#sample
+set.seed(123)
+
+n <- 100
+target_r <- 0.5
+xy <- MASS::mvrnorm(n = n, mu = c(0, 0), Sigma = matrix(c(1, target_r, target_r, 1), nrow = 2))
+df <- data.frame(x = xy[,1], y = xy[,2])
+
+cor.test(df$x, df$y)
+
+p <- ggplot(df, aes(x = x, y = y)) +
+  geom_point(color = "#00BFC4", size = 2, alpha = 0.8) +
+  geom_smooth(method = "lm", color = "#F8766D", se = TRUE) +
+  stat_cor(method = "pearson", aes(label = paste0("italic(r)~`=`~", signif(after_stat(r), 2), "~`,`~italic(p)~`=`~", signif(after_stat(p), 2))), parse = TRUE, label.x.npc = "left", label.y.npc = "top") +
+  theme_classic2(base_size = 16) +
+  labs(x = "Predicted", y = "Actual")
+ggsave("../result/03clinical_phenotype_analysis/MIL/example_cor_plot.pdf",p,width = 4,height = 3.7)
+
+
+```
+
+
+# c1 mut
+```{r}
+mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+mut_attn_mean_df <- mut_attn %>%
+  dplyr::filter(!is.na(trait), !is.na(mutation_id), !is.na(mean_attention)) %>%
+  dplyr::group_by(trait) %>%
+  dplyr::mutate(trait_mean_attention = mean(mean_attention, na.rm = TRUE), above_mean = mean_attention > trait_mean_attention) %>%
+  dplyr::ungroup()
+
+```
+
+#feature ana
+```{r}
+pheno1 <- as.data.table(readRDS("../data/clinical_phenotype_analysis/nor_pheno_by_Age_Gender_CCI.rds"))
+colnames(pheno1)[1]<-"sample_id"
+colnames(pheno1)<-gsub("\\.|\\-|\\/","_",colnames(pheno1))
+geno2<-fread("../data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv")
+pheno1<-pheno1[pheno1$sample_id%in%geno2$sample_id,]
+
+mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_results_v1/mut_attn.rds")
+
+mut_cor<-lapply(unique(mut_attn$trait),function(t){
+  tmp1<-mut_attn[mut_attn$trait==t,]
+  tmp1$mean_value <-lapply(tmp1$mutation_id,function(m){
+    sid<-unique(geno2$sample_id[geno2$mutation_id==m])
+    tmp2<-pheno1[pheno1$sample_id%in%sid,]
+    tmp2<-na.omit(select(tmp2,t))
+    colnames(tmp2)[1]<-"V1"
+    tmp3<-tmp2$V1%>%as.numeric()%>%mean()
+    return(tmp3)
+    })%>%unlist()
+  tmp4<-tmp1[tmp1$cluster!="Cluster1",] 
+  res1<-cor.test(tmp1$mean_attention,tmp1$mean_value)
+  res2<-cor.test(tmp4$mean_attention,tmp4$mean_value)
+  return(data.frame(trait=t,cor_v1=res1$estimate,cor_v1_p=res1$p.value,cor_v2=res2$estimate,cor_v2_p=res2$p.value))
+})%>%do.call(rbind,.)
+
+sam_cor<-lapply(unique(mut_attn$trait),function(t){
+  tmp1<-mut_attn[mut_attn$trait==t,]
+  tmp2<-na.omit(select(pheno1,c("sample_id",t)))
+  colnames(tmp2)[2]<-"V1"
+  tmp2$mean_attn <-lapply(tmp2$sample_id,function(s){
+    mid<-unique(geno2$mutation_id[geno2$sample_id==s])
+    tmp3=tmp1$mean_attention[tmp1$mutation_id%in%mid]
+    return(mean(tmp3))
+    })%>%unlist()
+  tmp2$sum_attn <-lapply(tmp2$sample_id,function(s){
+    mid<-unique(geno2$mutation_id[geno2$sample_id==s])
+    tmp3=tmp1$mean_attention[tmp1$mutation_id%in%mid]
+    return(sum(tmp3))
+    })%>%unlist()
+  
+  tmp2<-tmp2[!is.na(tmp2$mean_attn),]
+  res1<-cor.test(tmp2$V1,tmp2$mean_attn)
+  res2<-cor.test(tmp2$V1,tmp2$sum_attn)
+  return(data.frame(trait=t,cor_mean=res1$estimate,cor_mean_p=res1$p.value,cor_sum=res2$estimate,cor_sum_p=res2$p.value))
+})%>%do.call(rbind,.)
+
+tmp2$group<-ifelse(tmp2$V1<mean(tmp2$V1),"Low","High")
+tmp2$group<-factor(tmp2$group,levels = c("Low","High"))
+ggplot(tmp2,aes(V1,sum_attn))+
+  geom_point(color="#00BFC4")+
+  theme_classic2(base_size = 16)+
+  geom_smooth(method="lm",color="#F8766D")+
+  # stat_smooth(method = "pearson")+
+  stat_cor(method = "pearson")+
+  labs(x="Value")
+
+ggplot(tmp2,aes(group,sum_attn,color=group))+
+  geom_violin()+
+  geom_jitter(size=0.5)+
+  theme_classic2(base_size = 16)+
+  stat_compare_means()
+
+
+mut_fea<-unique(geno2[,c(1,5:20)])%>%as.data.frame()
+fea_cor<-lapply(unique(mut_attn$trait),function(t){
+  tmp1<-mut_attn[mut_attn$trait==t,]
+  tmp3<-lapply(3:17,function(i){
+    tmp1$feature_value<-mut_fea[,i][match(tmp1$mutation_id,mut_fea$mutation_id)]
+    tmp2<-tmp1[tmp1$cluster!="Cluster1",]
+    res1<-cor.test(tmp1$mean_attention,tmp1$feature_value)
+    res2<-cor.test(tmp2$mean_attention,tmp2$feature_value)
+    return(data.frame(trait=t,feature=colnames(mut_fea)[i],cor_v1=res1$estimate,cor_v1_p=res1$p.value,cor_v2=res2$estimate,cor_v2_p=res2$p.value))
+    })%>%do.call(rbind,.)
+  return(tmp3)
+})%>%do.call(rbind,.)
+```
+

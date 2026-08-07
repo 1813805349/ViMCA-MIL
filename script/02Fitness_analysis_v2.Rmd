@@ -1,0 +1,602 @@
+---
+title: "02Fitness_analysis"
+output: html_document
+---
+
+
+#relative fitness
+```{bash}
+cd /mnt/raid66/Personal_data/linghukepan/03proj/06COVID19/upload_version1/data/relative_fitness/pyr0
+python ./script/preprocess_usher.py \
+--usher-metadata-file-in ./data/metadata_usher.tsv \
+--nextstrain-metadata-file-in ./data/nextstrain_metadata.tsv \
+--tree-file-in ./data/all.masked.pb \
+--tree-file-out ./results/lineageTree.fine.pb \
+--stats-file-out ./results/stats.pkl > ./results/pyro_preprocess.log 2>&1
+
+python ./script/mutrans.py --vary-holdout  > ./results/pyro_analyze.log 2>&1
+```
+
+```{r}
+nsp_map <- data.frame(
+  nsp = paste0("NSP", 1:16),
+  poly_start = c(1, 181, 819, 2764, 3264, 3570, 3860, 3943, 4141, 4254, 4393, 4393, 5325, 5926, 6453, 6799),
+  poly_end   = c(180,818,2763,3263,3569,3859,3942,4140,4253,4392,4405,5324,5925,6452,6798,7096),
+  stringsAsFactors = FALSE
+)
+
+
+convert_mutation <- function(mut, orf1a_end = 4401, offset = NULL, nsp_table = nsp_map) {
+  if (!is.null(offset)) {
+    orf1a_end <- orf1a_end + offset
+  }
+  
+  parts <- strsplit(mut, ":")[[1]]
+  if (length(parts) != 2) stop("格式应为 ORF1a:XXX 或 ORF1b:XXX")
+  orf <- toupper(parts[1])
+  aa  <- parts[2]
+  pos <- as.numeric(gsub("[^0-9]", "", aa))
+  if (is.na(pos)) stop("无法解析位置")
+  
+  if (orf == "ORF1A") {
+    poly_pos <- pos
+  } else if (orf == "ORF1B") {
+    poly_pos <- orf1a_end + pos
+  } else stop("只支持 ORF1a 或 ORF1b")
+  
+  hits <- nsp_table[nsp_table$poly_start <= poly_pos & nsp_table$poly_end >= poly_pos, ]
+  if (nrow(hits) == 0) return(NA)
+  if (nrow(hits) > 1) hits <- hits[which.max(hits$poly_end - hits$poly_start), , drop = FALSE]
+  nsp_name <- hits$nsp
+  new_pos  <- poly_pos - hits$poly_start + 1
+  new_aa   <- sub("[0-9]+", as.character(new_pos), aa)
+  paste0(nsp_name, ":", new_aa)
+}
+
+mut_pyro<-fread("../data/relative_fitness/pyr0/results/mutations.tsv")
+
+
+
+mut_pyro$mutation_v2<-lapply(1:nrow(mut_pyro),function(i){
+if(grepl("ORF1[ab]",mut_pyro$mutation[i])){
+return (convert_mutation(mut_pyro$mutation[i]))
+}
+else return(mut_pyro$mutation[i])
+})%>%unlist()
+mut_pyro$mutation_v2<-gsub("STOP","*",mut_pyro$mutation_v2)
+saveRDS(mut_pyro,"../data/relative_fitness/pyr0/mutations_fit.rds")
+
+
+mut_pyro<-readRDS("../data/relative_fitness/pyr0/mutations_fit.rds")
+mut_pyro$label<-""
+mut_pyro$label[mut_pyro$mutation_v2%in%c(mut_pyro$mutation_v2[1:5],mut_pyro[order(mut_pyro$`R / R_A`,decreasing = T),]$mutation_v2[1:5],"NSP1:S135R","NSP13:R392C","NSP3:T24I")]<-mut_pyro$mutation_v2[mut_pyro$mutation_v2%in%c(mut_pyro$mutation_v2[1:5],mut_pyro[order(mut_pyro$`R / R_A`,decreasing = T),]$mutation_v2[1:5],"NSP1:S135R","NSP13:R392C","NSP3:T24I")]
+mut_pyro$group<-ifelse(mut_pyro$`mean/stddev`>5&mut_pyro$`R / R_A`>1,"sig","no_sig")
+
+p2<-ggplot(
+  mut_pyro, aes(x = `R / R_A`, y =sqrt(abs(`mean/stddev`)))) +
+  geom_point(data=mut_pyro,aes(color=group))+
+  scale_y_continuous(breaks = c(0,10,20,30,40,50),labels = c(0,100,400,900,1600,2500))+
+  scale_color_manual(values = c("grey","#C9746B"))+
+  geom_vline(xintercept=1,lty=4,col="grey",lwd=0.8) +
+  geom_hline(yintercept = sqrt(5),lty=4,col="grey",lwd=0.8) +
+  theme_classic(base_size = 16)+
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),) + 
+    labs(y="Zscore",x=expression("Effect size R"[m]*"/R"[wt]),color="Zscore") +
+  geom_text_repel(aes(label=label),nudge_x = 0.01,nudge_y = 0.01,max.overlaps = Inf)
+
+ggsave("../result/02Fitness_analysis/relative_fitness/mut_fitness_volcano.pdf",p2,width = 6.5,height =4.7)
+```
+
+
+#selection coefficient
+```{r}
+#1100 ncov inference
+nc_res<- fread("../data/GISAID_250706/ncov_inf/selection-nonsyn-observed.csv")
+nc_res$AAsub<-paste0(nc_res$protein,":",str_split_fixed(nc_res$`amino acid mutation`,">",2)[,1],nc_res$`amino acid number in protein`,str_split_fixed(nc_res$`amino acid mutation`,">",2)[,2])
+nc_res$AAsub<-gsub("-","del",nc_res$AAsub)
+nc_res<-lapply(unique(nc_res$AAsub),function(m){
+  tmp1<-nc_res[nc_res$AAsub==m,]
+  if(nrow(tmp1)==1){
+    return(tmp1)
+  }
+  else if(nrow(tmp1)>1){
+    tmp1<-tmp1[which.max(abs(tmp1$`selection coefficient`)),]
+    return(tmp1)
+  }
+})%>%do.call(rbind,.)
+nc_res<-nc_res[order(nc_res$`selection coefficient`,decreasing = T),]
+nc_res$label<-nc_res$AAsub
+nc_res$label[11:1915]=""
+nc_res$label[nc_res$AAsub%in%c("NSP1:S135R","NSP13:R392C","NSP3:T24I")]<-nc_res$AAsub[nc_res$AAsub%in%c("NSP1:S135R","NSP13:R392C","NSP3:T24I")]
+nc_res$od<-1:nrow(nc_res)
+nc_res$group<-ifelse(nc_res$`selection coefficient`>0.01,"sig","non_sig")
+saveRDS(nc_res,"../data/GISAID_260111/selection_coefficient/selection_nonsyn_observed.rds")
+
+nc_res<-readRDS("../data/GISAID_260111/selection_coefficient/selection_nonsyn_observed.rds")
+
+p1<-ggplot(nc_res,aes(x=od,y=`selection coefficient`))+
+  geom_point(data=nc_res,aes(color=group))+
+  theme_classic(base_size = 16)+
+  scale_color_manual(values = c("grey","#C9746B"))+
+  scale_y_continuous(breaks = c(-0.2,-0.1,0,0.01,0.1,0.2))+
+  geom_hline(yintercept=0.01,lty=4,col="grey",lwd=0.8)+
+  geom_text_repel(aes(label=label),nudge_x = 0.01,nudge_y = 0.01,max.overlaps = Inf)+
+  labs(x="")
+
+ggsave("../result/02Fitness_analysis/selection_coefficient/nc_fitness_mut.pdf",p1,height = 4.5,width = 6.5)
+
+```
+
+
+```{r}
+nc_res<-readRDS("../data/GISAID_260111/selection_coefficient/selection_nonsyn_observed.rds")
+mut_pyro<-readRDS("../data/relative_fitness/pyr0/mutations_fit.rds")
+
+cluster_assignments<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/mut_cluster_v1.rds")
+cluster_assignments$group2<-ifelse(cluster_assignments$cluster=="Cluster1","Cluster1","Cluster2-12")
+cluster_assignment2<-merge(cluster_assignments,mut_pyro[,3:11],by.x="AASub",by.y="mutation_v2",all.x=T)
+cluster_assignment2<-merge(cluster_assignment2,nc_res[,c(10:12,17)],by.x="AASub",by.y="AAsub",all.x=T)
+saveRDS(cluster_assignment2,"../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+cluster_assignment2<-readRDS("../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+
+sum(na.omit((cluster_assignment2$`R / R_A`>1)&(cluster_assignment2$`mean/stddev`>5))==TRUE)#276
+sum(na.omit((cluster_assignment2$`selection coefficient`> 0.01))==TRUE)#220
+
+#TableS2
+tmp<-cluster_assignment2[,c(1:4,7,12,15)]
+colnames(tmp)[5]<-"Z-score"
+tmp<-tmp[order(tmp$`selection coefficient`,decreasing = T),]
+write.xlsx(tmp,"../table/TableS2_mutations_cluster.xlsx")
+
+
+
+#Fig1D-E
+t<-wilcox.test(cluster_assignment2$`R / R_A`[cluster_assignment2$group=="Stable"],cluster_assignment2$`R / R_A`[cluster_assignment2$group=="Sporadic"])
+print(t$p.value,digits = 22)#0.0000000000000000000000000001223403752507213129474
+
+t<-wilcox.test(cluster_assignment2$`selection coefficient`[cluster_assignment2$group=="Stable"],cluster_assignment2$`selection coefficient`[cluster_assignment2$group=="Sporadic"])
+print(t$p.value,digits = 22)#0.000000000000004887272125504066978586
+
+p3<-ggplot(cluster_assignment2,aes(group,`R / R_A`,color=group))+
+  geom_boxplot(width=0.6)+
+  stat_compare_means(comparisons = list(c("Stable","Sporadic")),method = "wilcox.test")+
+  theme_classic(base_size = 16)+
+  scale_color_manual(values = c("#00BFC4","#F8766D"))+
+  geom_jitter( height = 0, width = 0.23,size=0.5,alpha=0.7) +
+  labs(x="",y="R / R_A")+
+  theme(axis.text.x = element_text(angle =45,hjust=1,vjust=1))+
+  coord_cartesian(clip = "off")
+
+p4<-ggplot(cluster_assignment2,aes(group,`selection coefficient`,color=group))+
+  geom_boxplot(width=0.6)+
+  stat_compare_means(comparisons = list(c("Stable","Sporadic")),method = "wilcox.test")+
+  theme_classic(base_size = 16)+
+  scale_color_manual(values = c("#00BFC4","#F8766D"))+
+  geom_jitter( height = 0, width = 0.23,size=0.5,alpha=0.7) +
+  labs(x="",y="selection coefficient")+
+  theme(axis.text.x = element_text(angle =45,hjust=1,vjust=1))+
+  coord_cartesian(clip = "off")
+
+
+p<-p3+p4+plot_layout(ncol = 2, guides = "collect")
+ggsave("../result/02Fitness_analysis/fitness_score_by_group2.pdf",p,width = 6.5,height = 4)
+
+#FigS1F
+t<-wilcox.test(cluster_assignment2$`mean/stddev`[cluster_assignment2$group=="Stable"],cluster_assignment2$`mean/stddev`[cluster_assignment2$group=="Sporadic"])
+print(t$p.value,digits = 22)#0.000000000000000000000000000000004416540004989598259332
+
+p5<-ggplot(cluster_assignment2,aes(group,`mean/stddev`,color=group))+
+  geom_boxplot(width=0.6)+
+  stat_compare_means(comparisons = list(c("Stable","Sporadic")),method = "wilcox.test")+
+  theme_classic(base_size = 16)+
+  scale_color_manual(values = c("#00BFC4","#F8766D"))+
+  geom_jitter( height = 0, width = 0.23,size=0.5,alpha=0.7) +
+  labs(x="",y="Z-score")+
+  theme(axis.text.x = element_text(angle =45,hjust=1,vjust=1))+
+  coord_cartesian(clip = "off")
+
+
+ggsave("../result/02Fitness_analysis/Z_score_by_group2.pdf",p5,width = 4.2,height = 4)
+
+
+#FigS1G
+cluster_assignment2_sig<-cluster_assignment2[(cluster_assignment2$`R / R_A`>1)&(cluster_assignment2$`mean/stddev`>5)&(cluster_assignment2$`selection coefficient`>0.01),]
+cluster_assignment2_sig<-cluster_assignment2_sig[!is.na(cluster_assignment2_sig$AASub),]
+#Sporadic   Stable 
+#      79       62 
+plot_df<-as.data.frame(table(cluster_assignment2_sig$cluster))
+plot_df<-plot_df[plot_df$Var1!="Cluster1",]
+plot_df$Var1<-gsub("Cluster","C",plot_df$Var1)
+p5<-ggplot(plot_df, aes(x =reorder(Var1,-Freq), y = Freq,label=Freq)) +
+  geom_bar(stat = "identity", fill = "steelblue",alpha=0.7) +
+  labs(
+    x = "",
+    y = "Mutation Count (high R/RA and selection coeffcient)"
+  ) +
+  geom_text(data=plot_df, aes(x =Var1, y = Freq+2))+
+  theme_classic2(base_size = 15) +
+  theme(
+    axis.text.x = element_text(angle = 65, vjust = 1, hjust = 1)
+  )
+
+ggsave("../result/02Fitness_analysis/high_fit_mut_count_by_cluster.pdf",p5,width = 5,height = 4)
+
+
+
+protein_color<-brewer.pal(9,name = "Set3")
+protein_color[2]<-"#EA5514"
+names(protein_color)<-c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+#Fig1G
+tmp<-cluster_assignment2[!is.na(cluster_assignment2$`R / R_A`)&!is.na(cluster_assignment2$`selection coefficient`),]
+p1<-ggplot(tmp,aes(`selection coefficient`,`R / R_A`,color=protein2))+
+  geom_point(aes(size=`mean/stddev`,alpha=0.7))+
+  theme_classic(base_size = 16)+
+  scale_size(range = c(2,7))+
+  geom_text_repel(
+      data =tmp[tmp$`R / R_A`>1.05&tmp$`selection coefficient`>0.01,],
+    aes(label = AASub,color=protein2),nudge_x = 0.01,nudge_y = 0.01,max.overlaps=5)+
+  scale_color_manual(values =protein_color)+
+  geom_vline(xintercept = 0.01,linetype="dashed",color="grey")+
+  geom_hline(yintercept = 1,linetype="dashed",color="grey")+
+  scale_x_continuous(breaks = c(-0.2,-0.1,0.0,0.01,0.05,0.1))+
+  # scale_y_continuous(breaks = c(0,10,20,30,40,50),labels = c(0,100,400,900,1600,2500))+
+   scale_y_continuous(breaks = c(0.9,1,1.02,1.06,1.10,1.2,1.3))+
+  labs(y="R / R_A",color="",size="Z-score")
+
+ggsave("../result/02Fitness_analysis/all_mut_fit_dotplot.pdf",p1,width = 7.5,height = 5)
+```
+
+
+
+```{r}
+cluster_assignment2_sig<-cluster_assignment2[cluster_assignment2$`selection coefficient`>0.01&cluster_assignment2$`R / R_A`>1&cluster_assignment2$`mean/stddev`>5,]
+cluster_assignment2_sig<-cluster_assignment2_sig[!is.na(cluster_assignment2_sig$AASub),]
+table(cluster_assignment2_sig$group)#79         62 
+table(cluster_assignment2_sig$group2)# 56          85 
+
+cluster_assignment3<-cluster_assignment2_sig[cluster_assignment2_sig$group=="Stable",]
+
+tmp<-as.data.frame(unique(cluster_assignment3[,c(1,3,4,5)]))
+tmp<-tmp[!is.na(tmp$AASub),]
+
+table(tmp$protein2)
+
+protein_color<-brewer.pal(9,name = "Set3")
+protein_color[2]<-"#EA5514"
+
+names(protein_color)<-c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+
+
+tmp$protein<-factor(tmp$protein,levels = c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15",
+                                                      "N","M","E","ORF3a","ORF7a","ORF7b"))
+
+p_col<-c(protein_color[c("S")],rep(protein_color[c("ORF1ab")],11),
+                                                                  protein_color[c("N","M","E","ORF3a","ORF7a","ORF7b")])
+names(p_col)<-c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15",
+                                                      "N","M","E","ORF3a","ORF7a","ORF7b")
+
+#Fig1F
+plot_df <- tmp %>%
+  dplyr::count(protein) %>%
+  dplyr::filter(!is.na(protein)) %>%
+  dplyr::mutate(
+    percent = n / sum(n) * 100,
+    ymax = cumsum(n),
+    ymin = lag(ymax, default = 0),
+    ymid = (ymax + ymin) / 2,
+    start = 2 * pi * ymin / sum(n),
+    end   = 2 * pi * ymax / sum(n),
+    mid   = 2 * pi * ymid / sum(n),
+    label_pct = paste0(round(percent,1), "%"),
+    label_name = str_replace(as.character(protein), "^NSP", "Nsp")
+  )
+
+plot_df <- plot_df %>%
+  mutate(
+    r_text = 0.62,
+    x_pct = r_text * sin(mid),
+    y_pct = r_text * cos(mid),
+    r1 = 1.00,
+    r2 = 1.10,
+    r3 = 1.28,
+    x1 = r1 * sin(mid),
+    y1 = r1 * cos(mid),
+    x2 = r2 * sin(mid),
+    y2 = r2 * cos(mid),
+    x3 = r3 * sin(mid),
+    y3 = r3 * cos(mid),
+    hjust = ifelse(x3 >= 0, 0, 1),
+    x_text = x3 + ifelse(x3 >= 0, 0.03, -0.03)
+  )
+
+p <- ggplot(plot_df) +
+  geom_arc_bar(
+    aes(x0 = 0,y0 = 0,r0 = 0,r = 1,
+      start = start,end = end,fill = protein),
+    color = "grey85",
+    linewidth = 0.4
+  ) +
+  geom_text(
+    aes(x = x_pct, y = y_pct, label = label_pct),
+    size = 5,
+    color = "black"
+  ) +
+ geom_segment(
+    aes(x = x1, y = y1, xend = x2, yend = y2),
+    linewidth = 0.45,
+    color = "black"
+  ) +
+  geom_segment(
+    aes(x = x2, y = y2, xend = x3, yend = y3),
+    linewidth = 0.45,
+    color = "black"
+  ) +
+  geom_text(
+    aes(x = x_text, y = y3, label = label_name, hjust = hjust),
+    size = 5.5,
+    color = "black"
+  ) +
+  scale_fill_manual(values = p_col, drop = FALSE) +
+  coord_fixed(clip = "off") +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = ggplot2::margin(20, 70, 20, 70)
+  )
+ggsave("../result/02Fitness_analysis/high_fit_stable_mut_piechart.pdf",p,width = 5,height = 5)
+
+
+#FigS1H
+protein_levels<-c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15","NSP16",
+                  "N","M","E","ORF3a","ORF7a","ORF7b","ORF8")
+
+protein_length<-data.frame(
+  protein=protein_levels,
+  aa_length=c(1273,180,638,1945,500,306,290,113,932,601,527,346,298,
+              419,222,75,275,121,43,121)
+)
+
+mutation_count<-tmp %>%
+  group_by(protein) %>%
+  dplyr::summarise(n_mutation=n_distinct(AASub),.groups="drop")
+
+
+plot_df<-protein_length %>%
+  left_join(mutation_count,by="protein") %>%
+  mutate(n_mutation=replace_na(n_mutation,0),
+         mutation_density=n_mutation/aa_length*100,
+         protein=factor(protein,levels=protein_levels)) %>%
+  filter(mutation_density>0) %>%
+  mutate(percent=mutation_density/sum(mutation_density)*100,
+         ymax=cumsum(mutation_density),
+         ymin=lag(ymax,default=0),
+         ymid=(ymax+ymin)/2,
+         start=2*pi*ymin/sum(mutation_density),
+         end=2*pi*ymax/sum(mutation_density),
+         mid=2*pi*ymid/sum(mutation_density),
+         label_pct=paste0(round(percent,1),"%"),
+         label_name=str_replace(as.character(protein),"^NSP","Nsp"))
+
+plot_df<-plot_df %>%
+  mutate(r_text=0.62,
+         x_pct=r_text*sin(mid),
+         y_pct=r_text*cos(mid),
+         r1=1,
+         r2=1.1,
+         r3=1.28,
+         x1=r1*sin(mid),
+         y1=r1*cos(mid),
+         x2=r2*sin(mid),
+         y2=r2*cos(mid),
+         x3=r3*sin(mid),
+         y3=r3*cos(mid),
+         hjust=ifelse(x3>=0,0,1),
+         x_text=x3+ifelse(x3>=0,0.03,-0.03))
+
+
+p_col<-c(protein_color["S"],rep(protein_color["ORF1ab"],12),
+         protein_color[c("N","M","E","ORF3a","ORF7a","ORF7b","ORF8")])
+names(p_col)<-protein_levels
+
+
+plot_df %>% select(protein,n_mutation,aa_length,mutation_density,percent)
+sum(plot_df$percent[grepl("NSP",plot_df$protein)])#23.88615
+## plot
+p<-ggplot(plot_df)+
+  geom_arc_bar(aes(x0=0,y0=0,r0=0,r=1,start=start,end=end,fill=protein),
+               color="grey85",linewidth=0.4)+
+  geom_text(aes(x=x_pct,y=y_pct,label=label_pct),size=5,color="black")+
+  geom_segment(aes(x=x1,y=y1,xend=x2,yend=y2),linewidth=0.45,color="black")+
+  geom_segment(aes(x=x2,y=y2,xend=x3,yend=y3),linewidth=0.45,color="black")+
+  geom_text(aes(x=x_text,y=y3,label=label_name,hjust=hjust),size=5.5,color="black")+
+  scale_fill_manual(values=p_col,drop=FALSE)+
+  coord_fixed(clip="off")+
+  theme_void()+
+  theme(legend.position="none",
+        plot.background=element_rect(fill="white",color=NA),
+        plot.margin=ggplot2::margin(20,70,20,70))
+ggsave("../result/02Fitness_analysis/high_fit_stable_mut_ratio_piechart.pdf",p,width = 5,height = 5)
+
+
+```
+
+
+
+
+#dNdS
+```{bash}
+#5130 
+cd /mnt/raid64/COVID19/Personal/lhkp/GISAID_250706/dN_dS
+python count_nm_sm_by_sequence_gene.py \
+  --msa ../data/GISAID_260111/msa_0523/msa_0523.fasta \
+  --features ../data/GISAID_260111/dN_dS/sarscov2_features.tsv \
+  --out ../data/GISAID_260111/dN_dS/all_seq_NmSm.tsv \
+  --skip-reference \
+  --min-valid-bases 29000 \
+  --exclude-genes nsp11
+```
+
+```{r}
+calculate_expected_sites <- function(cds_string) {
+  cds_seq <- s2c(tolower(cds_string))
+  if(length(cds_seq) %% 3 != 0) {
+    cds_seq <- cds_seq[1:(length(cds_seq) - (length(cds_seq) %% 3))]
+  }
+  
+  bases <- c("a", "c", "g", "t")
+  total_S <- 0
+  total_N <- 0
+  
+  for(i in seq(1, length(cds_seq), by = 3)) {
+    codon <- cds_seq[i:(i+2)]
+    
+    aa_ref <- translate(codon)
+    
+    if(aa_ref == "*") next 
+    
+    S_codon <- 0
+    N_codon <- 0
+    
+    for(pos in 1:3) {
+      original_base <- codon[pos]
+      if(!original_base %in% bases) next 
+      
+      mutations <- bases[bases != original_base] 
+      
+      for(mut in mutations) {
+        mut_codon <- codon
+        mut_codon[pos] <- mut
+        
+        aa_mut <- translate(mut_codon)
+        if(aa_mut == "*") next
+        if(aa_mut == aa_ref) {
+          S_codon <- S_codon + 1
+        } else {
+          N_codon <- N_codon + 1
+        }
+      }
+    }
+    
+    total_S <- total_S + (S_codon / 3)
+    total_N <- total_N + (N_codon / 3)
+  }
+  
+  return(data.frame(S_ref = total_S, N_ref = total_N))
+}
+```
+
+```{r}
+gene_struc <- openxlsx::read.xlsx("../data/SARS_CoV_2_reference/SARS-CoV-2_gene_structure.new.xlsx")
+gene_struc <- as.data.table(gene_struc)
+gene_struc <- gene_struc[!is.na(gene)]
+gene_struc[!grepl("nsp", gene), gene := ORF]
+gene_struc<-gene_struc[-12:-13,]
+library(seqinr)
+refseq_obj <- read.fasta("../data/SARS_CoV_2_reference/MN908947.genome.fasta", forceDNAtolower = TRUE, as.string = TRUE)
+refseq_str <- refseq_obj[[1]][1]
+
+cds_gff <- as.data.frame(gene_struc)
+
+results_table <- data.frame(
+  Gene = character(),
+  Length_bp = numeric(),
+  S_ref = numeric(),
+  N_ref = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(i in 1:nrow(cds_gff)) {
+  start_pos <- cds_gff[i, 2]
+  end_pos <- cds_gff[i, 3]
+  annot_info <- cds_gff[i, 6]
+  gene_name <- gsub(".*gene=([^;]+).*", "\\1", annot_info)
+  
+  gene_seq <- substr(refseq_str, start_pos, end_pos)
+  
+  sites <- calculate_expected_sites(gene_seq)
+  
+  results_table <- rbind(results_table, data.frame(
+    Gene = gene_name,
+    Length_bp = nchar(gene_seq),
+    S_ref = round(sites$S_ref, 2),
+    N_ref = round(sites$N_ref, 2)
+  ))
+}
+
+nsp12_part1 <- substr(refseq_str, 13442, 13468)
+nsp12_part2 <- substr(refseq_str, 13468, 16236)
+nsp12_merged_seq <- paste0(nsp12_part1, nsp12_part2)
+sites_nsp12 <- calculate_expected_sites(nsp12_merged_seq)
+nsp12_df<-data.frame(
+    Gene = "nsp12",
+    Length_bp = nchar(nsp12_merged_seq),
+    S_ref = round(sites_nsp12$S_ref, 2),
+    N_ref = round(sites_nsp12$N_ref, 2)
+  )
+results_table<-rbind(results_table,nsp12_df)
+saveRDS(results_table,"../data/GISAID_260111/dN_dS/NS_ref.rds")
+```
+
+
+```{r}
+
+gisaid_sp<-fread("../data/GISAID_260111/dN_dS/all_seq_NmSm.tsv")
+metainfo<-fread("../data/GISAID_260111/metadata_processed.tsv")
+metainfo_omi<-metainfo[metainfo$Clade%in%c("GRA"),]
+gisaid_sp_omi<-gisaid_sp[gisaid_sp$seq_id%in%metainfo_omi$`Accession ID`,]
+length(unique(gisaid_sp_omi$seq_id))#7425083
+NS_ref<-readRDS("../data/GISAID_260111/dN_dS/NS_ref.rds")
+
+observed_counts <- gisaid_sp_omi %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(
+    N_m = sum(Nm, na.rm = TRUE),
+    S_m = sum(Sm, na.rm = TRUE),
+    Total_Mutations = n()
+  )
+observed_counts$join_key <- toupper(observed_counts$gene)
+constants<-NS_ref
+constants$join_key <- toupper(constants$Gene)
+
+
+final_dnds_results <- observed_counts %>%
+  left_join(constants, by = "join_key") %>%
+  filter(!is.na(N_ref) & !is.na(S_ref)) %>%
+  mutate(
+    dN = N_m / N_ref,
+    dS = S_m / S_ref,
+    dN_dS_ratio = ifelse(dS == 0, NA, dN / dS)
+  ) %>%
+  select(Protein = gene, Length_bp, N_m, S_m, N_ref, S_ref, dN, dS, dN_dS_ratio) %>%
+  arrange(desc(dN_dS_ratio))
+saveRDS(final_dnds_results,"/mnt/raid64/COVID19/Personal/lhkp/GISAID_250706/dN_dS/dNdS_omicron.rds")
+
+final_dnds_results<-readRDS("/mnt/raid64/COVID19/Personal/lhkp/GISAID_250706/dN_dS/dNdS_omicron.rds")
+final_dnds_results_NSP<-final_dnds_results[grepl("^nsp",final_dnds_results$Protein),]
+final_dnds_results_NSP$Protein<-gsub("nsp","Nsp",final_dnds_results_NSP$Protein)
+
+#FigS1J
+p<-ggplot(final_dnds_results_NSP, aes(x =reorder(Protein,-dN_dS_ratio), y = dN_dS_ratio,fill=Protein)) +
+  geom_bar(stat = "identity") +
+  scale_fill_igv()+
+  labs(
+    x = "",
+    y = "dN/dS"
+  ) +
+  scale_y_continuous(breaks = seq(1,6,1))+
+  geom_hline(yintercept = 1,color="grey",linetype="dashed")+
+  theme_classic2(base_size = 15) +
+  theme(
+    axis.text.x = element_text(angle = 65, vjust = 1, hjust = 1)
+  )
+ggsave("../result/02Fitness_analysis/dN_dS_ratio_NSP_GISAID_Omicron.pdf",p,width = 7,height = 4)
+
+#TableS3
+
+write.xlsx(final_dnds_results_NSP[,-2],"../table/TableS3_Nsp_dN_dS.xlsx")
+```
+

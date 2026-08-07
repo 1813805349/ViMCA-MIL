@@ -1,0 +1,917 @@
+---
+title: "Untitled"
+author: "LHKP"
+date: "2025/8/29"
+output: html_document
+---
+
+#load pkgs
+```{r}
+library(data.table)
+library(magrittr)
+library(openxlsx)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(patchwork)
+library(stringr)
+library(parallel)
+library(ggrepel)
+library(lubridate)
+library(tidyr)
+library(purrr)
+library(broom)
+library(readr)
+library(eulerr)
+library(future.apply)
+library(future)
+library(circlize)
+library(binom)
+library(readxl)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(lessR)
+```
+
+#Chengdu
+```{r}
+metainfo_chengdu<-read.xlsx("../data/Chengdu_data/Chengdu_metainfo.xlsx")
+metainfo_chengdu$parent_lineage<-metainfo_chengdu$partiallyAliased
+metainfo_chengdu$parent_lineage[metainfo_chengdu$parent_lineage=="A"]<-"A*"
+metainfo_chengdu$parent_lineage[metainfo_chengdu$parent_lineage=="B"]<-"B"
+metainfo_chengdu$parent_lineage[metainfo_chengdu$partiallyAliased %in% c("BA.2.38", "BA.2")] <- "BA.2*"
+metainfo_chengdu$parent_lineage[grepl("^BA\\.5", metainfo_chengdu$partiallyAliased)] <- "BA.5*"
+metainfo_chengdu$parent_lineage[grepl("^JN|^BA\\.2\\.86\\.1", metainfo_chengdu$partiallyAliased)] <- "JN*"
+metainfo_chengdu$parent_lineage[grepl("^KP|^BA\\.2\\.86\\.1\\.1\\.11\\.1", metainfo_chengdu$partiallyAliased)] <- "KP*"
+metainfo_chengdu$parent_lineage[grepl("^XBB\\.1\\.5", metainfo_chengdu$partiallyAliased)] <- "XBB.1.5*"
+metainfo_chengdu$parent_lineage[grepl("^XBB\\.1\\.16", metainfo_chengdu$partiallyAliased)] <- "XBB.1.16*"
+metainfo_chengdu$parent_lineage[grepl("^FL|^XBB\\.1\\.9\\.1", metainfo_chengdu$partiallyAliased)] <- "FL*"
+metainfo_chengdu$parent_lineage[grepl("^EG\\.5\\.1|^XBB\\.1\\.9\\.2\\.5\\.1", metainfo_chengdu$partiallyAliased)] <- "EG.5.1*"
+metainfo_chengdu$parent_lineage[grepl("^HK", metainfo_chengdu$Nextclade_pango)] <- "HK*"
+metainfo_chengdu$parent_lineage[grepl("^HV", metainfo_chengdu$Nextclade_pango)] <- "HV*"
+metainfo_chengdu$parent_lineage[grepl("^XDV", metainfo_chengdu$Nextclade_pango)] <- "XDV*"
+metainfo_chengdu$parent_lineage[grepl("^NB", metainfo_chengdu$Nextclade_pango)] <- "NB*"
+metainfo_chengdu$parent_lineage[grepl("^PQ", metainfo_chengdu$Nextclade_pango)] <- "PQ*"
+metainfo_chengdu$parent_lineage[!metainfo_chengdu$parent_lineage%in%c("A*","B","BA.2*","XBB.1.5*","XBB.1.16*","HV*","HK*",
+                                                                    "JN*","BA.5*","XDV*","NB*","PQ*","KP*","FL*","EG.5.1*")]<-"Other"
+
+variant_col <- c(
+    "grey90","#E31A1C", "#1F78B4", "#33A02C", "#FF7F00", "#6A3D9A", 
+    "#FB9A99", "#A6CEE3", "#B2DF8A", "#FDBF6F", "#D9A1FF", 
+    "#FFFF99", "#B15928", "#8DD3C7", "#CAB2D6", "#FB8072",
+    "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5",
+    "#BC80BD", "#CCEBC5", "#FFED6F", "#7FC97F", "#542788", 
+    "#FDC086", "#FFFF99", "#386CB0", "#F0027F", "#BF5B17" 
+)
+names(variant_col)<-c("Other","A*","B","B.1","B.1.1","B.1.2","D.2","B.1.177*(EU1)","B.1.1.7(Alpha)",
+                                                                                "B.1.617.2*(Delta)","P.1*(Gamma)","BA.1*","BA.2*","BA.4*","BA.5*","BQ.1*",
+                                                                                "XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HV*","HK*","JN*","KP*",
+                                                                              "XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")
+metainfo_chengdu$parent_lineage<-factor(metainfo_chengdu$parent_lineage,levels = c("Other","A*","B","BA.2*","BA.5*","XBB.1.5*",
+                                                                                 "FL*","XBB.1.16*","EG.5.1*","KP*","HK*","JN*",
+                                                                                 "XDV*","NB*","PQ*"))  
+
+metainfo_chengdu$batch_date<-metainfo_chengdu$batch
+
+
+cumulative_data <- metainfo_chengdu %>%
+  dplyr::group_by(batch_date) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::arrange(batch_date) %>%
+  dplyr::mutate(cumulative = cumsum(n))
+
+
+max_count <- max(cumulative_data$n)
+max_cumulative <- max(cumulative_data$cumulative)
+
+
+all_dates <- sort(unique(metainfo_chengdu$batch_date))
+total_dates <- length(all_dates)
+
+
+tick_indices <- round(seq(1, total_dates, length.out = 13))
+
+#FigS1A
+p1 <- ggplot(metainfo_chengdu[!is.na(metainfo_chengdu$sample_id),], 
+             aes(x = factor(batch_date))) +
+  geom_bar(aes(fill = parent_lineage), stat = "count", position = "stack", width = 0.7) +
+  geom_line( 
+    data = cumulative_data,
+    aes(x = factor(batch_date), y = cumulative / max_cumulative * max_count, group = 1),
+    color = "#4D4D4D", 
+            linetype = "dashed", 
+            linewidth = 1
+  ) +
+  scale_x_discrete(
+    breaks = as.character(all_dates[tick_indices]), 
+    labels = format(as.Date(all_dates[tick_indices]), "%b %Y")
+  ) +
+  # ------------------------------
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.05)), 
+    sec.axis = sec_axis(
+      ~ . * max_cumulative / max_count, 
+      name = "Cumulative cases"
+    )
+  ) +
+  scale_fill_manual(values = variant_col[levels(metainfo_chengdu$parent_lineage)]) +
+  labs(x = "Date", y = "Number of cases", title = "", fill = "") +
+  theme_classic(base_size = 16)  +
+  theme(
+    legend.key.size = unit(1.2, "line"),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    panel.grid = element_blank(),
+    axis.line = element_line(colour = "black")
+  )
+ggsave("../result/01Evolutionary_analysis_variant_mutations/variant/case_distribution_Chengdu.pdf",width = 8,height = 4)
+```
+
+# GISAID evolutionary analysis of variant
+## Variant
+```{r}
+metainfo<-fread("../data/GISAID_260111/metadata_raw.tsv")#17525253
+metainfo<-metainfo[Host=="Human"]
+metainfo<-metainfo[`Is complete?`=="TRUE"]
+metainfo<-metainfo[is.na(`Is low coverage?`)]
+metainfo[, date := as.Date(`Collection date`)]
+metainfo<- metainfo[!is.na(date)]
+write.table(metainfo,"../data/GISAID_260111/metadata.tsv",col.names = T,row.names = F,sep = "\t",quote = F)
+
+metainfo<-fread("../data/GISAID_260111/metadata.tsv",select = c(5:7,13:14,16:17))#15529975
+metainfo$Pango_lineage2<-metainfo$`Pango lineage`
+
+
+metainfo$Pango_lineage2[grepl("^A\\.", metainfo$`Pango lineage`) | metainfo$`Pango lineage` == "A"] <- "A*"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "B"] <- "B"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "B.1"] <- "B.1"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "B.1.1"] <- "B.1.1"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "D.2"] <- "D.2"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "B.1.2"] <- "B.1.2"
+metainfo$Pango_lineage2[metainfo$`Pango lineage` == "B.1.1.7"] <- "B.1.1.7(Alpha)"
+metainfo$Pango_lineage2[grepl("^B\\.1\\.351", metainfo$`Pango lineage`)] <- "B.1.351*(Beta)"
+metainfo$Pango_lineage2[grepl("^B\\.1\\.177", metainfo$`Pango lineage`)] <- "B.1.177*(EU1)"
+metainfo$Pango_lineage2[grepl("^P\\.1", metainfo$`Pango lineage`)] <- "P.1*(Gamma)"
+metainfo$Pango_lineage2[grepl("^AY|^B\\.1\\.617\\.2", metainfo$`Pango lineage`)] <- "B.1.617.2*(Delta)" 
+metainfo$Pango_lineage2[grepl("^BA\\.1", metainfo$`Pango lineage`)] <- "BA.1*"
+metainfo$Pango_lineage2[grepl("^BA\\.2", metainfo$`Pango lineage`)] <- "BA.2*"
+metainfo$Pango_lineage2[grepl("^BA\\.4", metainfo$`Pango lineage`)] <- "BA.4*"
+metainfo$Pango_lineage2[grepl("^BA\\.5|^BF\\.7", metainfo$`Pango lineage`)] <- "BA.5*"
+metainfo$Pango_lineage2[grepl("^BQ\\.1", metainfo$`Pango lineage`)] <- "BQ.1*"
+metainfo$Pango_lineage2[grepl("^JN|^BA\\.2\\.86\\.1", metainfo$`Pango lineage`)] <- "JN*"
+metainfo$Pango_lineage2[grepl("^KP|^BA\\.2\\.86\\.1\\.1\\.11\\.1", metainfo$`Pango lineage`)] <- "KP*"
+metainfo$Pango_lineage2[grepl("^XBB\\.1\\.5", metainfo$`Pango lineage`)] <- "XBB.1.5*"
+metainfo$Pango_lineage2[grepl("^XBB\\.1\\.16", metainfo$`Pango lineage`)] <- "XBB.1.16*"
+metainfo$Pango_lineage2[grepl("^XBB\\.1\\.9\\.1|^FL", metainfo$`Pango lineage`)] <- "FL*"
+metainfo$Pango_lineage2[grepl("^EG\\.5\\.1", metainfo$`Pango lineage`)] <- "EG.5.1*"
+metainfo$Pango_lineage2[grepl("^HK", metainfo$`Pango lineage`)] <- "HK*"
+metainfo$Pango_lineage2[grepl("^HV", metainfo$`Pango lineage`)] <- "HV*"
+metainfo$Pango_lineage2[grepl("^XDV", metainfo$`Pango lineage`)] <- "XDV*"
+metainfo$Pango_lineage2[grepl("^NB", metainfo$`Pango lineage`)] <- "NB*"
+metainfo$Pango_lineage2[grepl("^PQ", metainfo$`Pango lineage`)] <- "PQ*"
+metainfo$Pango_lineage2[grepl("^XEC", metainfo$`Pango lineage`)] <- "XEC*"
+metainfo$Pango_lineage2[grepl("^LP\\.8", metainfo$`Pango lineage`)] <- "LP.8*"
+metainfo$Pango_lineage2[grepl("^XFG", metainfo$`Pango lineage`)] <- "XFG*"
+
+metainfo$Pango_lineage2[!metainfo$Pango_lineage2%in%c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]<-"Other"
+
+
+metainfo$date <- as.Date(metainfo$`Collection date`)
+write.table(metainfo,"../data/GISAID_260111/metadata_processed.tsv",col.names = T,row.names = F,sep = "\t",quote = F)
+
+metainfo<-fread("../data/GISAID_260111/metadata_processed.tsv")
+weekly_counts_worldwide <- metainfo[!grepl("China",metainfo$Location),] %>%
+  dplyr::mutate(week_date = floor_date(date, unit = "week")) %>% 
+  dplyr::group_by(week_date, lineage = Pango_lineage2) %>%
+  dplyr::summarise(cases = n(), .groups = 'drop')
+
+frequency_threshold <- 0.05 
+min_samples_per_week <- 30
+
+cleaned_data_worldwide <- weekly_counts_worldwide %>%
+  dplyr::group_by(week_date) %>%
+  dplyr::mutate(weekly_total_cases = sum(cases)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(frequency = cases / weekly_total_cases) %>%
+  dplyr::mutate(
+    cleaned_lineage = ifelse(weekly_total_cases < min_samples_per_week |frequency < frequency_threshold, "Other", lineage)
+  ) %>%
+  dplyr::group_by(week_date, cleaned_lineage) %>%
+  dplyr::summarise(cases = sum(cases), .groups = 'drop') 
+
+cleaned_data_worldwide$cleaned_lineage <- factor(cleaned_data_worldwide$cleaned_lineage, levels = c("Other","A*","B","B.1","B.1.1","B.1.2","D.2","B.1.177*(EU1)","B.1.1.7(Alpha)",
+                                                                                "B.1.617.2*(Delta)","P.1*(Gamma)","BA.1*","BA.2*","BA.4*","BA.5*","BQ.1*",
+                                                                                "XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HV*","HK*","JN*","KP*",
+                                                                              "XEC*","LP.8*","XDV*","NB*","PQ*","XFG*"))
+
+gisaid_colors <- c(
+    "grey90","#E31A1C", "#1F78B4", "#33A02C", "#FF7F00", "#6A3D9A",
+    "#FB9A99", "#A6CEE3", "#B2DF8A", "#FDBF6F", "#D9A1FF",
+    "#FFFF99", "#B15928", "#8DD3C7", "#CAB2D6", "#FB8072",
+    "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5", # 中性色
+    "#BC80BD", "#CCEBC5", "#FFED6F", "#7FC97F", "#542788",
+    "#FDC086", "#FFFF99", "#386CB0", "#F0027F", "#BF5B17"
+)
+
+gisaid_colors<-gisaid_colors[1:length(levels(cleaned_data_worldwide$cleaned_lineage))]
+names(gisaid_colors)<-levels(cleaned_data_worldwide$cleaned_lineage)
+cleaned_data_worldwide$cleaned_lineage[cleaned_data_worldwide$week_date=="2020-01-19"&cleaned_data_worldwide$cleaned_lineage=="B.1.1.7(Alpha)"]<-"Other"
+
+##Fig1B
+p1<-ggplot(cleaned_data_worldwide, aes(x = week_date, y = cases)) +
+  geom_area(aes(fill = cleaned_lineage),stat = "identity") +
+  geom_line(stat = "summary", fun = sum, color = "black", size = 0.6, alpha = 0.8) +
+  # scale_fill_manual(values = c("grey90",pal_igv(palette = "default")(20)))+
+   scale_fill_manual(values = gisaid_colors[levels(cleaned_data_worldwide$cleaned_lineage)])+
+  scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+ scale_x_date(date_labels = "%b %Y",breaks =seq(
+  from = as.Date("2019-12-01"), 
+  to = max(cleaned_data_worldwide$week_date, na.rm = TRUE), 
+  by = "6 months"
+)) +
+  labs(
+    x="",
+    y = "Number of cases",
+    fill = "Lineage"
+  ) +
+  theme_light(base_size = 15) +
+  theme(legend.key.size = unit(1.2, "line"),
+        axis.title.x = element_text(),
+        axis.title.y = element_text(),
+        axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1),
+        legend.title = element_text(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  scale_y_sqrt(breaks=c(0,10000,50000,100000,200000,400000,600000),labels = scales::comma) 
+ggsave("../result/01Evolutionary_analysis_variant_mutations/variant/GISAID_variant_distribution_without_china.pdf",p1,height = 4,width = 9)
+
+
+
+
+weekly_counts_china <- metainfo[grepl("China",metainfo$Location),] %>%
+  dplyr::mutate(week_date = floor_date(date, unit = "week")) %>% 
+  dplyr::group_by(week_date, lineage = Pango_lineage2) %>%
+  dplyr::summarise(cases = n(), .groups = 'drop')
+
+frequency_threshold <- 0.06 
+min_samples_per_week <- 20
+
+cleaned_data_china <- weekly_counts_china %>%
+  dplyr::group_by(week_date) %>%
+  dplyr::mutate(weekly_total_cases = sum(cases)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(frequency = cases / weekly_total_cases) %>%
+  dplyr::mutate(
+    cleaned_lineage = ifelse(weekly_total_cases < min_samples_per_week |frequency < frequency_threshold, "Other", lineage)
+  ) %>%
+  dplyr::group_by(week_date, cleaned_lineage) %>%
+  dplyr::summarise(cases = sum(cases), .groups = 'drop') 
+
+
+cleaned_data_china$cleaned_lineage <- factor(cleaned_data_china$cleaned_lineage, levels = c("Other","A*","B","B.1","B.1.1","B.1.2","D.2","B.1.177*(EU1)","B.1.1.7(Alpha)",
+                                                                                "B.1.617.2*(Delta)","P.1*(Gamma)","BA.1*","BA.2*","BA.4*","BA.5*","BQ.1*",
+                                                                                "XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HV*","HK*","JN*","KP*",
+                                                                              "XEC*","LP.8*","XDV*","NB*","PQ*","XFG*"))
+cleaned_data_china$cleaned_lineage[cleaned_data_china$week_date>as.Date("2020-03-01")&cleaned_data_china$cleaned_lineage=="A*"]<-"Other"
+
+p2<-ggplot(cleaned_data_china, aes(x = week_date, y = cases)) +
+  geom_area(aes(fill = cleaned_lineage),stat = "identity") +
+  geom_line(stat = "summary", fun = sum, color = "black", size = 0.6, alpha = 0.8) +
+   scale_fill_manual(values = gisaid_colors[levels(cleaned_data_china$cleaned_lineage)])+
+  scale_y_continuous(labels = scales::percent_format(), expand = c(0, 0)) +
+ scale_x_date(date_labels = "%b %Y",breaks =seq(
+  from = as.Date("2019-12-01"), 
+  to = max(cleaned_data_china$week_date, na.rm = TRUE), 
+  by = "6 months"
+)) +
+  labs(
+    x="",
+    y = "Number of cases",
+    fill = "Lineage"
+  ) +
+  theme_light(base_size = 15) +
+  theme(legend.key.size = unit(1.2, "line"),
+        axis.title.x = element_text(),
+        axis.title.y = element_text(),
+        axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1),
+        legend.title = element_text(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"))+
+  scale_y_sqrt(breaks=c(0,1000,3000,6000,10000),labels = scales::comma) 
+ggsave("../result/01Evolutionary_analysis_variant_mutations/variant/GISAID_variant_distribution_china.pdf",p2,height = 4,width = 9)
+
+```
+
+##Mutation
+###Calculate the daily frequency of mutations
+```{r}
+dt_gisaid<-fread("../data/GISAID_260111/metadata.tsv",select = c(5:6,17))
+setnames(dt_gisaid, old = c("Collection date", "AA Substitutions"), new = c("date", "aa_substitutions"))
+dt_gisaid[, date := as.Date(date)]
+dt_gisaid<- dt_gisaid[!is.na(date)]
+dt_gisaid <- dt_gisaid[!is.na(aa_substitutions) & aa_substitutions != "()"]
+dt_gisaid[, aa_substitutions := gsub("[()]", "", aa_substitutions)]
+daily_totals <- dt_gisaid[, .N, by = date]
+setnames(daily_totals, "N", "daily_total_sequences")
+
+
+split_indices <- split(1:nrow(dt_gisaid), cut(1:nrow(dt_gisaid), 100))
+options(future.globals.maxSize = 5*2048 * 1024^2)
+results_list_counts <- future_lapply(split_indices, function(indices) {
+  chunk <- dt_gisaid[indices, ]
+  chunk_counts <- chunk[,
+                        as.data.table(table(unlist(strsplit(aa_substitutions, ",")))),
+                        by = date
+  ]
+  return(chunk_counts)
+}, future.seed = TRUE) 
+
+merged_counts <- rbindlist(results_list_counts)
+
+mutation_daily_counts <- merged_counts[, .(mutation_count = sum(N)), by = .(date, V1)]
+
+setnames(mutation_daily_counts, "V1", "AASub")
+mutation_daily_counts <- mutation_daily_counts[AASub != ""]
+
+
+all_mutations <- unique(mutation_daily_counts$AASub)
+
+
+batch_size <- 10000
+batches <- split(all_mutations, ceiling(seq_along(all_mutations) / batch_size))
+
+
+results_list_final <- list()
+
+
+for (i in seq_along(batches)) {
+  current_batch_mutations <- batches[[i]]
+  batch_grid <- CJ(
+    AASub = current_batch_mutations,
+    date = unique(daily_totals$date)
+  )
+  batch_mutation_counts <- mutation_daily_counts[AASub %in% current_batch_mutations]
+  batch_final_dt <- batch_mutation_counts[batch_grid, on = .(date, AASub)]
+  batch_final_dt <- daily_totals[batch_final_dt, on = .(date)]
+  batch_final_dt[is.na(mutation_count), mutation_count := 0]
+  batch_final_dt[, proportion := mutation_count / daily_total_sequences]
+  ci <- binom.confint(batch_final_dt$mutation_count, batch_final_dt$daily_total_sequences, methods = "exact")
+  batch_final_dt[, `:=`(
+    proportionCILow = ci$lower,
+    proportionCIHigh = ci$upper
+  )]
+  saveRDS(batch_final_dt,paste0("../data/GISAID_260111/mutation_frequency_daily/mut_prev_batch_",i))
+}
+
+```
+
+```{r}
+set.seed(1)
+files<-list.files("../data/GISAID_260111/mutation_frequency_daily/",pattern = "mut_prev_batch")
+mut_prev<-lapply(files,function(f){
+  tmp<-readRDS(paste0("../data/GISAID_260111/mutation_frequency_daily/",f))
+  return(tmp)       
+})%>%do.call(rbind,.)
+mut_prev<-mut_prev[mut_prev$AASub%in%mut_prev$AASub[mut_prev$proportion>=0.05],]
+saveRDS(mut_prev,"../data/GISAID_260111/mutation_frequency_daily/all_mut_prev.rds")
+```
+
+
+###Calculate the frequency of mutations across major variants
+```{r}
+dt_gisaid<-fread("../data/GISAID_260111/metadata.tsv",select = c(5:6,13:14,16:17))
+dt_gisaid[, date := as.Date(`Collection date`)]
+dt_gisaid<- dt_gisaid[!is.na(date)]
+
+dt_gisaid$Pango_lineage2<-dt_gisaid$`Pango lineage`
+dt_gisaid$Pango_lineage2[grepl("^A\\.", dt_gisaid$`Pango lineage`) | dt_gisaid$`Pango lineage` == "A"] <- "A*"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "B"] <- "B"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "B.1"] <- "B.1"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "B.1.1"] <- "B.1.1"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "D.2"] <- "D.2"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "B.1.2"] <- "B.1.2"
+dt_gisaid$Pango_lineage2[dt_gisaid$`Pango lineage` == "B.1.1.7"] <- "B.1.1.7(Alpha)"
+dt_gisaid$Pango_lineage2[grepl("^B\\.1\\.351", dt_gisaid$`Pango lineage`)] <- "B.1.351*(Beta)"
+dt_gisaid$Pango_lineage2[grepl("^B\\.1\\.177", dt_gisaid$`Pango lineage`)] <- "B.1.177*(EU1)"
+dt_gisaid$Pango_lineage2[grepl("^P\\.1", dt_gisaid$`Pango lineage`)] <- "P.1*(Gamma)"
+dt_gisaid$Pango_lineage2[grepl("^AY|^B\\.1\\.617\\.2", dt_gisaid$`Pango lineage`)] <- "B.1.617.2*(Delta)" 
+dt_gisaid$Pango_lineage2[grepl("^BA\\.1", dt_gisaid$`Pango lineage`)] <- "BA.1*"
+dt_gisaid$Pango_lineage2[grepl("^BA\\.2", dt_gisaid$`Pango lineage`)] <- "BA.2*"
+dt_gisaid$Pango_lineage2[grepl("^BA\\.4", dt_gisaid$`Pango lineage`)] <- "BA.4*"
+dt_gisaid$Pango_lineage2[grepl("^BA\\.5|^BF\\.7", dt_gisaid$`Pango lineage`)] <- "BA.5*"
+dt_gisaid$Pango_lineage2[grepl("^BQ\\.1", dt_gisaid$`Pango lineage`)] <- "BQ.1*"
+dt_gisaid$Pango_lineage2[grepl("^JN|^BA\\.2\\.86\\.1", dt_gisaid$`Pango lineage`)] <- "JN*"
+dt_gisaid$Pango_lineage2[grepl("^KP|^BA\\.2\\.86\\.1\\.1\\.11\\.1", dt_gisaid$`Pango lineage`)] <- "KP*"
+dt_gisaid$Pango_lineage2[grepl("^XBB\\.1\\.5", dt_gisaid$`Pango lineage`)] <- "XBB.1.5*"
+dt_gisaid$Pango_lineage2[grepl("^XBB\\.1\\.16", dt_gisaid$`Pango lineage`)] <- "XBB.1.16*"
+dt_gisaid$Pango_lineage2[grepl("^XBB\\.1\\.9\\.1|^FL", dt_gisaid$`Pango lineage`)] <- "FL*"
+dt_gisaid$Pango_lineage2[grepl("^EG\\.5\\.1", dt_gisaid$`Pango lineage`)] <- "EG.5.1*"
+dt_gisaid$Pango_lineage2[grepl("^HK", dt_gisaid$`Pango lineage`)] <- "HK*"
+dt_gisaid$Pango_lineage2[grepl("^HV", dt_gisaid$`Pango lineage`)] <- "HV*"
+dt_gisaid$Pango_lineage2[grepl("^XDV", dt_gisaid$`Pango lineage`)] <- "XDV*"
+dt_gisaid$Pango_lineage2[grepl("^NB", dt_gisaid$`Pango lineage`)] <- "NB*"
+dt_gisaid$Pango_lineage2[grepl("^PQ", dt_gisaid$`Pango lineage`)] <- "PQ*"
+dt_gisaid$Pango_lineage2[grepl("^XEC", dt_gisaid$`Pango lineage`)] <- "XEC*"
+dt_gisaid$Pango_lineage2[grepl("^LP\\.8", dt_gisaid$`Pango lineage`)] <- "LP.8*"
+dt_gisaid$Pango_lineage2[grepl("^XFG", dt_gisaid$`Pango lineage`)] <- "XFG*"
+
+dt_gisaid$Pango_lineage2[!dt_gisaid$Pango_lineage2%in%c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]<-"Other"
+
+
+setnames(dt_gisaid,
+         old = c("AA Substitutions", "Pango_lineage2"),
+         new = c("aa_substitutions", "pango_lineage2"))
+
+
+dt_gisaid <- dt_gisaid[!is.na(aa_substitutions) & aa_substitutions != "()" & !is.na(pango_lineage2) & pango_lineage2 != ""]
+
+dt_gisaid[, aa_substitutions := gsub("[()]", "", aa_substitutions)]
+
+lineage_totals <- dt_gisaid[, .(total_sequences = .N), by = pango_lineage2]
+
+unique_lineages <- unique(dt_gisaid$pango_lineage2)
+
+results_list <- lapply(unique_lineages, function(lineage) {
+  subset_dt <- dt_gisaid[pango_lineage2 == lineage]
+  split_substitutions <- subset_dt[, .(AASub = unlist(strsplit(aa_substitutions, ",")))]
+  split_substitutions[, pango_lineage2 := lineage]
+  return(split_substitutions)
+})
+
+mutation_counts_unaggregated <- rbindlist(results_list)
+
+mutation_counts <- mutation_counts_unaggregated[, .(mutation_count = .N), by = .(pango_lineage2, AASub)]
+
+
+final_frequencies <- lineage_totals[mutation_counts, on = "pango_lineage2"]
+
+final_frequencies[, frequency := mutation_count / total_sequences]
+
+setorder(final_frequencies, pango_lineage2, -frequency)
+saveRDS(final_frequencies,"../data/GISAID_260111/mutation_frequency_across_major_variant/mut_prev_across_major_variants.rds")
+
+```
+
+
+###Mutation clustering analysis
+```{r}
+mut_prev<-readRDS("../data/GISAID_260111/mutation_frequency_daily/all_mut_prev.rds")
+length(unique(mut_prev$AASub))#1161
+
+mut_prev_variant<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/mut_prev_across_major_variants.rds")
+mut_prev_variant<-mut_prev_variant[mut_prev_variant$AASub%in%unique(mut_prev$AASub),]
+length(unique(mut_prev_variant$AASub))#1161
+
+mut_prev_variant$AASub<-gsub("_",":",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("Spike","S",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("NS3","ORF3a",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("NS6","ORF6",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("NS7a","ORF7a",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("NS7b","ORF7b",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("NS8","ORF8",mut_prev_variant$AASub)
+mut_prev_variant$AASub<-gsub("stop","*",mut_prev_variant$AASub)
+saveRDS(mut_prev_variant,"../data/GISAID_260111/mutation_frequency_across_major_variants/filter_mut_prev_across_major_variants.rds")
+
+mut_prev_variant<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/filter_mut_prev_across_major_variants.rds")
+
+#FigS1B
+mut_prev_variant$protein<-str_split_fixed(mut_prev_variant$AASub,":",2)[,1]
+mut_prev_variant$protein2<-mut_prev_variant$protein
+mut_prev_variant$protein2[grepl("NSP",mut_prev_variant$protein2)]<-"ORF1ab"
+
+protein_color <- brewer.pal(9, name = "Set3")
+protein_color[2] <- "#EA5514"
+names(protein_color) <- c("S","ORF1ab","N","M","E","ORF3a","ORF7b","ORF7a","ORF8")
+
+lineage_levels <- c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                    "P.1*(Gamma)","B.1.617.2*(Delta)","BA.1*","BA.2*","BA.4*","BA.5*","BQ.1*","XBB.1.5*",
+                    "FL*","XBB.1.16*","EG.5.1*","HK*","HV*","JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")
+plot_df3 <- mut_prev_variant %>%
+  dplyr::mutate(freq = ifelse(frequency > 0.5, 1, 0)) %>%
+  dplyr::filter(freq == 1, pango_lineage2 != "Other") %>%
+  dplyr::count(pango_lineage2, protein2, name = "Freq") %>%
+  dplyr::mutate(pango_lineage2 = factor(pango_lineage2, levels = lineage_levels))
+
+label_df <- plot_df3 %>%
+  dplyr::group_by(pango_lineage2) %>%
+  dplyr::summarise(total = sum(Freq), .groups = "drop")
+
+p1 <- ggplot(plot_df3, aes(x = pango_lineage2, y = Freq, fill = protein2)) +
+  geom_bar(stat = "identity", alpha = 0.9, width = 0.85) +
+  geom_text(data = label_df, aes(x = pango_lineage2, y = total + 2, label = total), inherit.aes = FALSE, size = 4) +
+  scale_fill_manual(values = protein_color) +
+  labs(x = "", y = "Mutation Count", fill = "Protein") +
+  theme_classic2(base_size = 15) +
+  theme(axis.text.x = element_text(angle = 65, vjust = 1, hjust = 1))
+ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/mut_count_by_variant_barplot.pdf",p1,width = 11,height = 5)
+
+
+
+#FigS1C
+
+tmp<-unique(mut_prev_variant[mut_prev_variant$frequency>0.5,c(3,6,7)])#260
+tmp<-tmp[!is.na(tmp$AASub),]
+tmp$protein<-factor(tmp$protein,levels = c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15","NSP16",
+                                                      "N","M","E","ORF3a","ORF7a","ORF7b","ORF8"))
+
+p_col<-c(protein_color[c("S")],rep(protein_color[c("ORF1ab")],12),
+                                                                  protein_color[c("N","M","E","ORF3a","ORF7a","ORF7b","ORF8")])
+names(p_col)<-c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15","NSP16",
+                                                      "N","M","E","ORF3a","ORF7a","ORF7b","ORF8")
+
+plot_df <- tmp %>%
+  dplyr::count(protein) %>%
+  dplyr::filter(!is.na(protein)) %>%
+  dplyr::mutate(
+    percent = n / sum(n) * 100,
+    ymax = cumsum(n),
+    ymin = lag(ymax, default = 0),
+    ymid = (ymax + ymin) / 2,
+    start = 2 * pi * ymin / sum(n),
+    end   = 2 * pi * ymax / sum(n),
+    mid   = 2 * pi * ymid / sum(n),
+    label_pct = paste0(round(percent,1), "%"),
+    label_name = str_replace(as.character(protein), "^NSP", "Nsp")
+  )
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    r_text = 0.62,
+    x_pct = r_text * sin(mid),
+    y_pct = r_text * cos(mid),
+    r1 = 1.00,
+    r2 = 1.10,
+    r3 = 1.28,
+    x1 = r1 * sin(mid),
+    y1 = r1 * cos(mid),
+    x2 = r2 * sin(mid),
+    y2 = r2 * cos(mid),
+    x3 = r3 * sin(mid),
+    y3 = r3 * cos(mid),
+    hjust = ifelse(x3 >= 0, 0, 1),
+    x_text = x3 + ifelse(x3 >= 0, 0.03, -0.03)
+  )
+
+p <- ggplot(plot_df) +
+  geom_arc_bar(
+    aes(x0 = 0,y0 = 0,r0 = 0,r = 1,
+      start = start,end = end,fill = protein),
+    color = "grey85",
+    linewidth = 0.4
+  ) +
+  geom_text(
+    aes(x = x_pct, y = y_pct, label = label_pct),
+    size = 5,
+    color = "black"
+  ) +
+ geom_segment(
+    aes(x = x1, y = y1, xend = x2, yend = y2),
+    linewidth = 0.45,
+    color = "black"
+  ) +
+  geom_segment(
+    aes(x = x2, y = y2, xend = x3, yend = y3),
+    linewidth = 0.45,
+    color = "black"
+  ) +
+  geom_text(
+    aes(x = x_text, y = y3, label = label_name, hjust = hjust),
+    size = 5.5,
+    color = "black"
+  ) +
+  scale_fill_manual(values = p_col, drop = FALSE) +
+  coord_fixed(clip = "off") +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.margin = ggplot2::margin(20, 70, 20, 70)
+  )
+table(tmp$protein2)
+#E      M      N ORF1ab  ORF3a  ORF7a  ORF7b   ORF8      S 
+# 2      8     23     76      7      2      3      7    132
+ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/high_mut_piechart.pdf",p,width = 5,height = 5)
+# ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/c2_to_c12_mut_piechart.pdf",p,width = 5,height = 5)
+
+
+#FigureS1D
+protein_levels<-c("S","NSP1","NSP2","NSP3","NSP4","NSP5","NSP6","NSP9","NSP12","NSP13","NSP14","NSP15","NSP16",
+                  "N","M","E","ORF3a","ORF7a","ORF7b","ORF8")
+
+## mature protein length (aa)
+protein_length<-data.frame(
+  protein=protein_levels,
+  aa_length=c(1273,180,638,1945,500,306,290,113,932,601,527,346,298,
+              419,222,75,275,121,43,121)
+)
+
+## prevalent mutations
+tmp<-mut_prev_variant %>%
+  filter(frequency>0.5,!is.na(AASub),!is.na(protein)) %>%
+  select(AASub,protein) %>%
+  distinct() %>%
+  filter(protein%in%protein_levels)
+
+## mutation number
+mutation_count<-tmp %>%
+  dplyr::group_by(protein) %>%
+  dplyr::summarise(n_mutation=n_distinct(AASub),.groups="drop")
+
+## calculate normalized mutation density
+plot_df<-protein_length %>%
+  dplyr::left_join(mutation_count,by="protein") %>%
+  mutate(n_mutation=replace_na(n_mutation,0),
+         mutation_density=n_mutation/aa_length*100,
+         protein=factor(protein,levels=protein_levels)) %>%
+  filter(mutation_density>0) %>%
+  mutate(percent=mutation_density/sum(mutation_density)*100,
+         ymax=cumsum(mutation_density),
+         ymin=lag(ymax,default=0),
+         ymid=(ymax+ymin)/2,
+         start=2*pi*ymin/sum(mutation_density),
+         end=2*pi*ymax/sum(mutation_density),
+         mid=2*pi*ymid/sum(mutation_density),
+         label_pct=paste0(round(percent,1),"%"),
+         label_name=str_replace(as.character(protein),"^NSP","Nsp"))
+
+## label position
+plot_df<-plot_df %>%
+  mutate(r_text=0.62,
+         x_pct=r_text*sin(mid),
+         y_pct=r_text*cos(mid),
+         r1=1,
+         r2=1.1,
+         r3=1.28,
+         x1=r1*sin(mid),
+         y1=r1*cos(mid),
+         x2=r2*sin(mid),
+         y2=r2*cos(mid),
+         x3=r3*sin(mid),
+         y3=r3*cos(mid),
+         hjust=ifelse(x3>=0,0,1),
+         x_text=x3+ifelse(x3>=0,0.03,-0.03))
+
+## color
+p_col<-c(protein_color["S"],rep(protein_color["ORF1ab"],12),
+         protein_color[c("N","M","E","ORF3a","ORF7a","ORF7b","ORF8")])
+names(p_col)<-protein_levels
+
+## check table
+plot_df %>% select(protein,n_mutation,aa_length,mutation_density,percent)
+sum(plot_df$percent[grepl("NSP",plot_df$protein)])#29.1325
+## plot
+p<-ggplot(plot_df)+
+  geom_arc_bar(aes(x0=0,y0=0,r0=0,r=1,start=start,end=end,fill=protein),
+               color="grey85",linewidth=0.4)+
+  geom_text(aes(x=x_pct,y=y_pct,label=label_pct),size=5,color="black")+
+  geom_segment(aes(x=x1,y=y1,xend=x2,yend=y2),linewidth=0.45,color="black")+
+  geom_segment(aes(x=x2,y=y2,xend=x3,yend=y3),linewidth=0.45,color="black")+
+  geom_text(aes(x=x_text,y=y3,label=label_name,hjust=hjust),size=5.5,color="black")+
+  scale_fill_manual(values=p_col,drop=FALSE)+
+  coord_fixed(clip="off")+
+  theme_void()+
+  theme(legend.position="none",
+        plot.background=element_rect(fill="white",color=NA),
+        plot.margin=ggplot2::margin(20,70,20,70))
+
+ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/high_mut_ratio_piechart.pdf",p,width = 5,height = 5)
+
+
+
+plot_df1<-dcast(data=mut_prev_variant[,c(1,3,5)],AASub~pango_lineage2)
+plot_df1[is.na(plot_df1)]<-0
+plot_df1<-as.data.frame(plot_df1)
+rownames(plot_df1)<-plot_df1$AASub
+plot_df2<-plot_df1[,c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]
+plot_df2<-t(plot_df2)%>%as.data.frame()
+
+set.seed(1)
+hclust_result <- hclust(dist(as.matrix(t(plot_df2))),method = "ward.D2")
+
+k_clusters <- 12
+clusters <- cutree(hclust_result, k = k_clusters)
+
+
+cluster_assignments <- data.frame(
+  AASub = names(clusters),
+  cluster = paste0("Cluster", clusters) 
+)
+cluster_assignments$protein<-str_split_fixed(cluster_assignments$AASub,":",2)[,1]
+
+cluster_assignments$group<-ifelse(cluster_assignments$cluster%in%paste0("Cluster",c(3,4,8,12)),"Stable","Sporadic")
+cluster_assignments$protein2<-gsub("^NSP.*","ORF1ab",cluster_assignments$protein)
+saveRDS(cluster_assignments,"../data/GISAID_260111/mutation_frequency_across_major_variants/mut_cluster_v1.rds")
+
+cluster_assignments<-readRDS("../data/GISAID_260111/mutation_frequency_across_major_variants/mut_cluster_v1.rds")
+
+
+#Fig1C
+col_fun = colorRamp2(c(0, 0.5, 1), c("#2166ac", "#f7f7f7", "#b2182b")) 
+
+plot_df1$cluster<-cluster_assignments$cluster[match(plot_df1$AASub,cluster_assignments$AASub)]
+plot_df1_mean <- plot_df1[,-1] %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(across(everything(), mean, na.rm = TRUE))
+plot_df1_mean2<-plot_df1_mean[,c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]
+rownames(plot_df1_mean2)<-gsub("Cluster","C",plot_df1_mean$cluster)
+
+cairo_pdf("../result/01Evolutionary_analysis_variant_mutations/mutation/GISAID_mutations_frequency_heatmap.pdf",width = 10,height = 5)
+Heatmap(
+  as.matrix((plot_df1_mean2)), 
+  name = "Frequency",
+  col = col_fun,
+  cluster_columns = FALSE, 
+  column_title = NULL,
+  cluster_rows = TRUE, 
+  show_row_names = TRUE,
+  row_names_side = "right",
+ clustering_method_rows = "average",
+  show_column_names = TRUE,
+  rect_gp = gpar(col = "NA")
+
+)
+dev.off()
+
+
+
+
+lineage_order <- c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                   "P.1*(Gamma)","B.1.617.2*(Delta)",
+                   "BA.1*","BA.2*","BA.4*",
+                   "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                   "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")
+
+lineage_order <- lineage_order[lineage_order %in% unique(mut_prev_variant$pango_lineage2)]
+extra_lineage <- setdiff(unique(mut_prev_variant$pango_lineage2), lineage_order)
+lineage_order <- c(lineage_order, extra_lineage)
+
+cluster_info <- cluster_assignments %>%
+  dplyr::select(AASub, cluster, group) %>%
+  distinct()
+
+plot_df <- mut_prev_variant %>%
+  left_join(cluster_info, by = "AASub") %>%
+  filter(!is.na(.data$cluster)) %>%
+  mutate(
+    pango_lineage2 = factor(pango_lineage2, levels = lineage_order),
+    lineage_index = as.numeric(pango_lineage2),
+    frequency = as.numeric(frequency)
+  )
+
+
+plot_df_full <- plot_df %>%
+  dplyr::select(AASub, cluster, protein2, group, pango_lineage2, lineage_index, frequency) %>%
+  distinct() %>%
+  complete(
+    AASub,
+    pango_lineage2 = factor(lineage_order, levels = lineage_order),
+    fill = list(frequency = 0)
+  ) %>%
+  dplyr::select(AASub, pango_lineage2, frequency) %>%
+  left_join(cluster_info, by = "AASub") %>%
+  filter(!is.na(.data$cluster)) %>%
+  mutate(
+    lineage_index = as.numeric(pango_lineage2),
+    frequency = ifelse(is.na(frequency), 0, frequency)
+  )
+
+cluster_n <- plot_df_full %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(n_mut = n_distinct(AASub), .groups = "drop") %>%
+  mutate(cluster_label = paste0(cluster, " (", n_mut, ")"))
+
+plot_df_full <- plot_df_full %>%
+  left_join(cluster_n, by = "cluster")
+
+
+cluster_summary <- plot_df_full %>%
+  group_by(cluster, cluster_label, lineage_index, pango_lineage2) %>%
+  dplyr::summarise(
+    median_freq = median(frequency, na.rm = TRUE),
+    mean_freq = mean(frequency, na.rm = TRUE),
+    q25 = quantile(frequency, 0.25, na.rm = TRUE),
+    q75 = quantile(frequency, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+plot_df_full$cluster<-factor(plot_df_full$cluster,levels = paste0("Cluster",c(3,4,8,12,1,2,5,6,7,9,10,11)))
+cluster_summary$cluster<-factor(cluster_summary$cluster,levels = paste0("Cluster",c(3,4,8,12,1,2,5,6,7,9,10,11)))
+cluster_summary<-cluster_summary[order(cluster_summary$cluster),]
+cluster_summary$cluster_label<-factor(cluster_summary$cluster_label,levels =unique( cluster_summary$cluster_label))
+
+#FigS1E
+p <- ggplot() +
+  geom_line(data=plot_df_full,aes(x=lineage_index,y=frequency,group=AASub),color="#6FA6C8",alpha=0.25,linewidth=0.35) +
+  geom_ribbon(data=cluster_summary,aes(x=lineage_index,ymin=q25,ymax=q75),fill="#D95F5F",alpha=0.18) +
+  geom_line(data=cluster_summary,aes(x=lineage_index,y=median_freq),color="#C63D3D",linewidth=1.1) +
+  facet_wrap(~cluster_label,ncol=4,scales="fixed") +
+  scale_y_continuous(limits=c(0,1),breaks=c(0,0.25,0.5,0.75,1),expand=c(0.01,0.01)) +
+  scale_x_continuous(breaks=seq_along(lineage_order),labels=rep("",length(lineage_order)),expand=c(0.01,0.01)) +
+  labs(x="SARS-CoV-2 evolutionary order (A* > XFG*)",y="Mutation frequency") +
+  theme_classic(base_size=13) +
+  theme(strip.background=element_blank(),
+        strip.text=element_text(size=11,face="bold"),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title=element_text(size=14),
+        panel.spacing=unit(1.1,"lines"))
+ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/GISAID_mutations_cluster_v1.pdf",p,width = 10,height = 7)
+
+cluster_summary <- cluster_summary %>%
+  mutate(cluster_label = factor(cluster_label, levels = unique(cluster_n$cluster_label)))
+
+p_combined <- ggplot(data = cluster_summary, aes(x = lineage_index, group = cluster_label)) +
+  geom_line(aes(y = median_freq, color = cluster_label), linewidth = 1.0) +
+  scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1), expand = c(0.01, 0.01)) +
+  scale_x_continuous(breaks = seq_along(lineage_order), labels = rep("", length(lineage_order)), expand = c(0.01, 0.01)) +
+  scale_color_viridis_d(option = "turbo", name = "Cluster",alpha=0.5) + 
+  scale_fill_viridis_d(option = "turbo", name = "Cluster") +
+  labs(x ="SARS-CoV-2 evolutionary order (A* > XFG*)",y = "Mutation frequency") +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title = element_text(size = 14),
+    legend.position = "right",             # 显示 Cluster 图例
+    legend.title = element_text(face = "bold"),
+    legend.key.height = unit(0.8, "line")
+  )
+ggsave("../result/01Evolutionary_analysis_variant_mutations/mutation/GISAID_mutations_cluster_v2.pdf",p_combined,width = 7,height = 4)
+
+#FigS1I
+plot_df1_nsp<-plot_df1[plot_df1$AASub%in%cluster_assignments$AASub[cluster_assignments$group=="Stable"&cluster_assignments$protein2=="ORF1ab"],]#16
+mut_lab <- plot_df1_nsp$AASub
+plot_df1_nsp<-plot_df1_nsp[,c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]
+
+rownames(plot_df1_nsp) <- mut_lab
+# row_lab_expr <- parse(text = gsub("^([^:]+):(.+)$", "\\1^\\2", rownames(plot_df1_nsp)))
+cairo_pdf("../result/01Evolutionary_analysis_variant_mutations/mutation/GISAID_mutations_frequency_stable_NSP_heatmap.pdf",width = 8,height = 4)
+Heatmap(
+  as.matrix((plot_df1_nsp)), 
+  name = "Frequency",
+  col = col_fun,
+  cluster_columns = FALSE, 
+  column_title = NULL,
+  cluster_rows = TRUE, 
+  show_row_names = T,
+  # row_labels = row_lab_expr,
+  row_names_side = "right",
+  show_column_names = TRUE,
+  rect_gp = gpar(col = "NA")
+
+)
+dev.off()
+
+
+#FigS2G
+
+cluster_assignment2<-readRDS("../result/02Fitness_analysis/cluster_assignments_fitness_v1.rds")
+cluster_assignment2_sig<-cluster_assignment2[(cluster_assignment2$`selection coefficient`>0.01)&(cluster_assignment2$`R / R_A`>1)&(cluster_assignment2$`mean/stddev`>5)&(cluster_assignment2$group=="Stable")&(cluster_assignment2$protein2=="ORF1ab"),]
+cluster_assignment2_sig<-cluster_assignment2_sig[!is.na(cluster_assignment2_sig$AASub),]
+
+plot_df1_nsp_stable<-plot_df1[plot_df1$AASub%in%cluster_assignment2_sig$AASub,]
+plot_df1_nsp_stable<-plot_df1_nsp_stable[,c("A*","B","B.1","B.1.1","D.2","B.1.2","B.1.177*(EU1)","B.1.1.7(Alpha)","B.1.351*(Beta)",
+                                                      "P.1*(Gamma)","B.1.617.2*(Delta)",
+                                                      "BA.1*","BA.2*","BA.4*",
+                                                      "BA.5*","BQ.1*","XBB.1.5*","FL*","XBB.1.16*","EG.5.1*","HK*","HV*",
+                                                      "JN*","KP*","XEC*","LP.8*","XDV*","NB*","PQ*","XFG*")]
+cairo_pdf("../result/01Evolutionary_analysis_variant_mutations/mutation/Stable_high_mutations_frequency_heatmap.pdf",width = 8,height = 4)
+Heatmap(
+  as.matrix((plot_df1_nsp_stable)), 
+  name = "Frequency",
+  col = col_fun,
+  cluster_columns = FALSE, 
+  column_title = NULL,
+  cluster_rows = TRUE, 
+  show_row_names = TRUE,
+  row_names_side = "right",
+
+  show_column_names = TRUE,
+  rect_gp = gpar(col = "NA")
+
+)
+dev.off()
+
+```
