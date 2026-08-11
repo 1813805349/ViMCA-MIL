@@ -2,7 +2,6 @@
 
 **Vi**ral **M**utation–**C**linical **A**ssociation analysis based on a gated-attention **M**ultiple **I**nstance **L**earning model
 <img width="2126" height="616" alt="image" src="https://github.com/user-attachments/assets/09cec173-c381-4bc5-80ae-653dba06e56b" />
-
 </br>
 
 ## What is ViMCA-MIL?
@@ -294,8 +293,6 @@ Each mutation instance is represented by 15 features:
 | Physicochemical properties | `Molecular_weight`, `Theoretical_PI`, `Extinction_coefficients`, `Aliphatic_index`, `grand_average_of_hydropathicity` | Cov2Var |
 | Functional impact | `Protein_Func` (pathogenicity), `SIFT_Probability`, `PROVEAN_Score` | Cov2Var / SIFT / PROVEAN |
 
-All features are standardized (`StandardScaler`) before model input.
-
 </br>
 
 ## MIL model
@@ -338,10 +335,7 @@ averaged over the 10 refittings.
 ## Contact
 
 For questions about the code, please open an issue or contact
-Kepan Linghu (linghukepan@stu.scu.edu.cn) or Lu Chen (luchen@scu.edu.cn).
-
-This project is associated with the West China Hospital, Sichuan University and the
-West China Second University Hospital, Sichuan University.
+Lu Chen (luchen@scu.edu.cn) or Kepan Linghu (lhkp5457@163.com).
 
 </br>
 
