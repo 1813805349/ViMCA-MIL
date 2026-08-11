@@ -18,8 +18,6 @@ EPOCHS=150
 BASE_SEED=42
 R_THRESHOLD=0
 
-# 为了速度，默认不保存 Phase1 的 100 个模型权重；保存 Phase1 attention 和 prediction。
-# 如果必须保存 Phase1 模型，把 SAVE_PHASE1_MODEL 改成 1，但会显著增加 I/O 和耗时。
 SAVE_PHASE1_MODEL=1
 SAVE_PHASE1_ATTENTION=1
 SAVE_PHASE1_PRED=1
@@ -71,7 +69,7 @@ wait
 
 echo "All trait jobs finished."
 
-# 合并每个 trait 的 summary
+
 python - <<EOF
 import os, glob
 import pandas as pd
