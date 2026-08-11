@@ -1,6 +1,7 @@
 # ViMCA-MIL
 
 **Vi**ral **M**utation–**C**linical **A**ssociation analysis based on a gated-attention **M**ultiple **I**nstance **L**earning model
+<img width="2126" height="616" alt="image" src="https://github.com/user-attachments/assets/09cec173-c381-4bc5-80ae-653dba06e56b" />
 
 </br>
 
