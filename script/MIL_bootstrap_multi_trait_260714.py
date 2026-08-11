@@ -1,7 +1,3 @@
-#5130 CARP
-# run_mil_one_trait.py
-# Single-trait MIL training script for single-GPU multi-process parallel running
-
 import os
 import re
 import argparse
@@ -19,9 +15,6 @@ from tqdm import trange
 
 warnings.filterwarnings("ignore")
 
-# ===============================
-# 0. 参数设置
-# ===============================
 parser = argparse.ArgumentParser()
 parser.add_argument("--trait", type=str, required=True, help="Trait name to run")
 parser.add_argument("--output_dir", type=str, default="/mnt/raid66/Personal_data/linghukepan/03proj/06COVID19/upload_version1/data/clinical_phenotype_analysis/MIL/train/multi_traits_results_260714_parallel")
@@ -71,9 +64,7 @@ print(f"Output: {OUTPUT_DIR}")
 print(f"N_BOOT={args.n_boot}, N_FULL={args.n_full}, EPOCHS={args.epochs}")
 print(f"SAVE_PHASE1_MODEL={args.save_phase1_model}")
 
-# ===============================
-# 1. 数据读取
-# ===============================
+
 GENO_PATH = "/mnt/raid66/Personal_data/linghukepan/03proj/06COVID19/upload_version1/data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv"
 PHENO_PATH = "/mnt/raid66/Personal_data/linghukepan/03proj/06COVID19/upload_version1/data/clinical_phenotype_analysis/MIL/prepeare/nor_pheno_by_Age_Gender_CCI.csv"
 
@@ -91,9 +82,7 @@ FEATURE_COLS = [
 if trait not in pheno.columns:
     raise ValueError(f"Trait {trait} not found in phenotype file.")
 
-# ===============================
-# 2. 标准化 + sample cache
-# ===============================
+
 scaler = StandardScaler()
 geno_scaled = geno.copy()
 geno_scaled[FEATURE_COLS] = scaler.fit_transform(geno_scaled[FEATURE_COLS].fillna(0))
@@ -107,9 +96,7 @@ for sid, g in geno_scaled.groupby("sample_id"):
         "mut_ids": mut_ids
     }
 
-# ===============================
-# 3. Dataset 类
-# ===============================
+
 class MutationMILDataset(Dataset):
     def __init__(self, pheno_df, target_col, sample_ids, sample_cache):
         pheno_df = pheno_df.dropna(subset=[target_col])
@@ -132,9 +119,7 @@ class MutationMILDataset(Dataset):
         mut_ids = self.sample_cache[sid]["mut_ids"]
         return X, torch.tensor(y), sid, mut_ids
 
-# ===============================
-# 4. MIL 模型
-# ===============================
+
 class GatedAttentionMIL(nn.Module):
     def __init__(self, in_dim, hidden_dim=64, dropout=0.25):
         super().__init__()
@@ -162,9 +147,7 @@ class GatedAttentionMIL(nn.Module):
         y = self.regressor(M).squeeze()
         return y, A.squeeze(1)
 
-# ===============================
-# 5. 核心训练与评估函数
-# ===============================
+
 def train_and_eval(pheno_df, target_trait, train_ids, val_ids, seed, return_model=False):
     set_seed(seed)
 
@@ -331,9 +314,7 @@ def train_and_eval(pheno_df, target_trait, train_ids, val_ids, seed, return_mode
 
     return mean_attn, metrics, all_pred_rows, None
 
-# ===============================
-# 6. 主程序：单 trait
-# ===============================
+
 valid_pheno = pheno.dropna(subset=[trait])
 
 if len(valid_pheno) < 10:
@@ -348,9 +329,7 @@ if len(valid_pheno) < 10:
 all_samples = valid_pheno["sample_id"].unique()
 print(f"N samples for {trait}: {len(all_samples)}")
 
-# ==========================================
-# Phase 1: Bootstrap Stability Evaluation
-# ==========================================
+
 print(f"  > Phase 1: Stability Check (N={args.n_boot})")
 
 phase1_metrics = []
@@ -465,9 +444,7 @@ if avg_val_pr < args.r_threshold:
     }]).to_csv(f"{SUMMARY_DIR}/Summary_{trait_safe}.csv", index=False)
     raise SystemExit
 
-# ==========================================
-# Phase 2: Full Dataset Discovery
-# ==========================================
+
 print(f"  > Phase 2: Full Training Discovery (Repeats={args.n_full})")
 
 final_attentions = defaultdict(list)
@@ -556,7 +533,7 @@ if args.save_phase2_pred and len(phase2_pred_all) > 0:
         index=False
     )
 
-# 汇总突变重要性
+
 mut_rows = []
 for mut, vals in final_attentions.items():
     vals = np.array(vals)
