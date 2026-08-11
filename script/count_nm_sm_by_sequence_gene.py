@@ -73,10 +73,7 @@ def classify_nm_sm(ref_aa, alt_aa):
 
 
 def build_ref_coordinate_map(ref_aligned):
-    """
-    alignment column -> reference coordinate.
-    ref gap column 记为 -1。
-    """
+
     aln_to_ref_pos = []
     ref_pos = 0
     ref_ungapped = []
@@ -93,16 +90,7 @@ def build_ref_coordinate_map(ref_aligned):
 
 
 def load_features(feature_tsv):
-    """
-    feature 文件需要包含:
-    feature, start, end, ORF, gene
 
-    同一个 gene 可以有多段，例如 nsp12:
-    nsp12 13442-13468
-    nsp12 13468-16236
-
-    代码会按文件顺序拼接同一 gene 的所有片段。
-    """
     df = pd.read_csv(feature_tsv, sep="\t")
 
     required = {"feature", "start", "end", "ORF", "gene"}
@@ -133,14 +121,7 @@ def load_features(feature_tsv):
 
 
 def build_coding_context(ref_ungapped, features):
-    """
-    ref_pos_to_contexts[ref_pos] = list of contexts.
 
-    使用 list 是为了允许：
-    1. nsp11 / nsp12 重叠
-    2. nsp12 frameshift，13468 在 nsp12 transcript 中重复使用
-    3. ORF7a / ORF7b 重叠
-    """
     ref_pos_to_contexts = defaultdict(list)
 
     for feat in features:
