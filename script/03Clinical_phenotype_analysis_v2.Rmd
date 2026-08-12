@@ -826,6 +826,14 @@ mut_attn<-readRDS("../data/clinical_phenotype_analysis/MIL/train/multi_traits_re
 tmp<-mut_attn[,c(11,1,8,2)]
 write.xlsx(tmp,"../table/TableS7_MIL_attention_map.xlsx")
 
+
+ins_pheno_map <- read.xlsx("../data/clinical_phenotype_analysis/clinical_phenotype_ref.xlsx")
+ins_pheno_map$Severity.relationship[grepl('Unknow', ins_pheno_map$Severity.relationship)] <- "Unknown"
+ins_pheno_map$Severity.relationship[grepl('Positive', ins_pheno_map$Severity.relationship)] <- "Severe"
+ins_pheno_map$Severity.relationship[grepl('Negative', ins_pheno_map$Severity.relationship)] <- "Nonsevere"
+ins_pheno_map$Trait <- gsub(" ", "_", ins_pheno_map$Trait)
+ins_pheno_map$Trait <- gsub("-", "_", ins_pheno_map$Trait)
+
 mut_attn2<-mut_attn
 mut_attn_df<-dcast(data=mut_attn2[,c(1,11,2)],trait~mutation_id)%>%as.data.frame()
 mut_Z_df<-dcast(data=mut_attn2[,c(1,11,4)],trait~mutation_id)%>%as.data.frame()
@@ -886,6 +894,19 @@ col_groups<-str_split_fixed(col_groups,":",2)[,1]
 col_groups[grepl("NSP",col_groups)]<-"ORF1ab"
 col_groups<-factor(col_groups,levels = c("S","ORF1ab","M","N","E","ORF3a","ORF7a","ORF7b","ORF8"))
 
+severity_bar_col <- c(Severe="#E41A1C",Nonsevere="#377EB8",Unknown="grey60")
+
+trait_severity <- ins_pheno_map %>%
+  dplyr::select(Trait,Severity.relationship) %>%
+  dplyr::distinct()
+
+row_color_df <- data.frame(trait=rownames(mut_attn_df)) %>%
+  dplyr::left_join(trait_severity,by=c("trait"="Trait")) %>%
+  dplyr::mutate(Severity.relationship=ifelse(is.na(Severity.relationship),"Unknown",Severity.relationship))
+
+row_font_color <- severity_bar_col[row_color_df$Severity.relationship]
+names(row_font_color) <- row_color_df$trait
+
 #FigS2E  
 cairo_pdf("../result/03clinical_phenotype_analysis/MIL/atten_Z_heatmap.pdf",width = 8,height = 4.5)
 Heatmap(t(scale(t(as.matrix(mut_attn_df)))), 
@@ -894,6 +915,7 @@ Heatmap(t(scale(t(as.matrix(mut_attn_df)))),
         # bottom_annotation = bottom_ha,   
         show_column_names = FALSE,         
         show_row_names = TRUE, 
+        row_names_gp=gpar(col=row_font_color[rownames(mut_attn_df)],fontsize=10),
         col = col_fun,
         clustering_method_columns = "ward.D2",
         clustering_method_rows = "ward.D2",
@@ -902,7 +924,6 @@ Heatmap(t(scale(t(as.matrix(mut_attn_df)))),
         cluster_row_slices = FALSE,   
         row_title_rot = 0,            
         row_gap = unit(3, "mm"),      
-        
         border = TRUE
 )
 dev.off()
@@ -934,7 +955,38 @@ nsp_levels <- paste0("NSP", 1:16)
 nsp_anno$nsp <- factor(nsp_anno$nsp, levels = nsp_levels)
 nsp_color <- colorRampPalette(brewer.pal(12, "Set3"))(16)
 names(nsp_color) <- nsp_levels
-nsp_ha <- HeatmapAnnotation(NSP = nsp_anno$nsp, col = list(NSP = nsp_color))
+
+
+nsp_count_df <- mut_attn_mean_df %>%
+  dplyr::filter(above_mean%in%c(TRUE,"TRUE",1),mutation_id%in%nsp_mut) %>%
+  dplyr::left_join(ins_pheno_map %>% dplyr::select(Trait,Severity.relationship) %>% dplyr::distinct(),by=c("trait"="Trait")) %>%
+  dplyr::mutate(Severity.relationship=ifelse(is.na(Severity.relationship),"Unknown",Severity.relationship)) %>%
+  dplyr::count(mutation_id,Severity.relationship)
+
+severity_levels <- c("Severe","Nonsevere","Unknown")
+nsp_count_df <- nsp_count_df %>%
+  tidyr::complete(mutation_id=nsp_mut,Severity.relationship=severity_levels,fill=list(n=0))
+
+
+nsp_count_mat <- nsp_count_df %>%
+  tidyr::pivot_wider(names_from=Severity.relationship,values_from=n,values_fill=0) %>%
+  as.data.frame()
+
+
+rownames(nsp_count_mat) <- nsp_count_mat$mutation_id
+
+nsp_count_mat <- nsp_count_mat[nsp_mut,severity_levels]
+
+nsp_ha <- HeatmapAnnotation(
+  "High attention features"=anno_barplot(nsp_count_mat,
+                                   gp=gpar(fill=severity_bar_col),
+                                   border=FALSE,
+                                   height=unit(1,"cm"),
+                                   ylim=c(0,max(nsp_count_mat)+1)),
+  annotation_name_gp=gpar(fontsize=10)
+)
+
+# nsp_ha <- HeatmapAnnotation(NSP = nsp_anno$nsp, col = list(NSP = nsp_color))
 
 nsp_mat <- mut_attn_mat[, nsp_mut, drop = FALSE]
 nsp_col_groups <- factor(nsp_anno$nsp, levels = nsp_levels)
@@ -958,7 +1010,33 @@ star_mat[star_index] <- "*"
 
 col_fun = colorRamp2(c(-2, 0, 4), c("#2166ac", "#f7f7f7", "#b2182b"))
 cairo_pdf("../result/03clinical_phenotype_analysis/MIL/atten_Z_heatmap_stable_NSP_high_mutations.pdf", width = 6, height = 4.5)
-Heatmap(nsp_mat, name = "Scaled attention", show_column_names = TRUE, column_names_gp = gpar(fontsize = 12), column_names_rot = 90, show_row_names = TRUE, col = col_fun,clustering_method_columns="ward.D2",clustering_method_rows="ward.D2",row_names_side="right",row_split=row_groups,cluster_row_slices=FALSE,row_title_rot=0,row_gap=grid::unit(3,"mm"),cluster_column_slices=FALSE,border=TRUE,cell_fun=function(j,i,x,y,width,height,fill){if(star_mat[i,j]=="*"){star_color <- "black";grid::grid.text("*",x,y,gp=grid::gpar(fontsize=11,fontface="bold",col=star_color))}})
+Heatmap(nsp_mat,
+        name="Attention",
+        top_annotation=nsp_ha,
+        show_column_names=TRUE,
+        column_names_gp=gpar(fontsize=11),
+        column_names_rot=90,
+        show_row_names=TRUE,
+        row_names_gp=gpar(col=row_font_color[rownames(nsp_mat)],fontsize=10),
+        col=col_fun,
+        cluster_columns=TRUE,
+        show_column_dend=FALSE,
+        clustering_method_columns="ward.D2",
+        clustering_method_rows="ward.D2",
+        row_names_side="right",
+        row_split=row_groups,
+        cluster_row_slices=FALSE,
+        row_title_rot=0,
+        row_gap=unit(3,"mm"),
+        border=TRUE,
+        cell_fun=function(j,i,x,y,width,height,fill){
+          if(star_mat[i,j]=="*"){
+            grid::grid.text("*",
+                            x,
+                            y,
+                            gp=grid::gpar(fontsize=11,fontface="bold"))
+          }
+        })
 dev.off()
 
 
