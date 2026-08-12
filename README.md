@@ -17,22 +17,22 @@ Briefly, the framework consists of four steps:
 1. **Evolutionary analysis.** Variant and mutation frequency trajectories are
    characterized across major SARS-CoV-2 variants using ~15.5 million genomic
    sequences from GISAID (Dec 2019 – Jan 2026) together with locally sequenced
-   genomes from West China Hospital, Sichuan University. Recurrent mutations
-   (frequency > 5% at any sampled time point) are clustered into evolutionary
-   clusters to distinguish *stable* from *sporadic* mutations.
-2. **Fitness and transmission analysis.** Relative viral fitness (R/R<sub>A</sub>)
+   genomes from West China Hospital, Sichuan University.
+   Recurrent mutations are clustered into evolutionary clusters to distinguish
+    *stable* from *sporadic* mutations.
+3. **Fitness and transmission analysis.** Relative viral fitness (R/R<sub>A</sub>)
    is estimated with the [PyR0](https://github.com/broadinstitute/pyro) workflow on
    the UShER phylogeny, and transmission selection coefficients are inferred from
    regional genomic surveillance data following
    [Lee *et al.*](https://www.nature.com/articles/s41467-024-55593-0).
    EVEscape-derived fitness effects are additionally computed per protein.
-3. **Clinical phenotype analysis.** For a cohort of 490 patients with matched viral
+4. **Clinical phenotype analysis.** For a cohort of 490 patients with matched viral
    genomes and clinical records (78 blood routine, blood chemistry, immune cell and
    cytokine/chemokine features), features are normalized (inverse normal
    transformation), adjusted for age, sex and a Charlson comorbidity index (CCI)
    weighted clinical burden score, and filtered by temporal correlation with the
-   course of the pandemic, yielding 38 phenotype traits.
-4. **Gated-attention MIL modeling.** Each patient is treated as a *bag* of the
+   course of the pandemic, yielding 38 temporally correlated traits.
+5. **Gated-attention MIL modeling.** Each patient is treated as a *bag* of the
    mutations detected in the matched viral genome; each mutation is an *instance*
    represented by 15 mutation-level features. The model predicts each patient-level
    clinical feature value from the attention-weighted aggregation of its mutations,
@@ -55,8 +55,6 @@ enhance viral replication while attenuating pulmonary pathogenicity.
 [Output](#output)  
 [Tutorial](#tutorial)  
 [Mutation features](#mutation-features)  
-[MIL model](#mil-model)  
-[Data availability](#data-availability)  
 [Contact](#contact)  
 [Citation](#citation)
 
@@ -104,8 +102,7 @@ Developed with `R 4.2.1`. Main packages used:
     data.table, openxlsx, readxl, dplyr, tidyr, purrr, stringr, lubridate,
     ggplot2, ggpubr, ggrepel, patchwork, cowplot, ggsci, RColorBrewer,
     ComplexHeatmap, circlize, eulerr, binom, caret, bestNormalize, broom,
-    future.apply, lessR, Biostrings, clusterProfiler, enrichplot, GseaVis,
-    GSEABase
+    future.apply,  Biostrings, clusterProfiler
 
 External tools invoked by the analysis notebooks:
 
@@ -194,17 +191,30 @@ evaluated mutations are defined as high-attention mutations for that feature.
 `script/02Fitness_analysis_v2.Rmd`
 
 - **Relative fitness**: runs the PyR0 workflow (`preprocess_usher.py`,
-  `mutrans.py`) on the UShER tree from the UCSC Genome Browser. Mutations with
-  R/R<sub>A</sub> > 1 and Z-score > 5 are considered to significantly increase
-  relative fitness.
+  `mutrans.py`) on the UShER tree from the UCSC Genome Browser.
 - **Transmission selection coefficient**: computes region-specific temporal
   prevalence trajectories (`epi-covar.py`) and infers selection coefficients
-  (`epi-inf-parallel.py`) for regions with ≥ 1,000 sequences; coefficients > 0.01
-  define high transmission effect.
+  (`epi-inf-parallel.py`).
 - Maps ORF1a/ORF1b mutations to Nsp coordinates and integrates EVEscape-derived
   fitness effects.
 
-### Step 3 — Clinical phenotype preprocessing
+### Step 3 — Selection pressure (dN/dS) analysis
+
+`script/count_nm_sm_by_sequence_gene.py`
+
+Counts nonsynonymous (Nm) and synonymous (Sm) substitutions per sequence and per
+gene directly from a SARS-CoV-2 MSA, relative to the Wuhan-Hu-1 reference, which
+are used to estimate dN/dS with the Nei–Gojobori method:
+
+```bash
+python count_nm_sm_by_sequence_gene.py \
+    --msa gisaid_msa.fasta.gz \
+    --features gene_annotation.csv \
+    --out nm_sm_counts.csv \
+    --skip-reference
+```
+
+### Step 4 — Clinical phenotype preprocessing
 
 `script/03Clinical_phenotype_analysis_v2.Rmd`
 
@@ -215,9 +225,9 @@ evaluated mutations are defined as high-attention mutations for that feature.
   features.
 - Calculates Pearson temporal correlations between each clinical feature and the
   infection date; the 38 significant features (P < 0.05) are retained as the MIL
-  phenotype set (16 severe-related, 14 non-severe-related, 8 unclassified).
+  phenotype set (16 severe-related, 14 non-severe-related, 8 unknown).
 
-### Step 4 — Gated-attention MIL modeling
+### Step 5 — Gated-attention MIL modeling
 
 `script/MIL_bootstrap_multi_trait_260714.py` + `script/run_MIL.sh`
 
@@ -262,23 +272,6 @@ bound of the 95% confidence interval across all evaluated traits are retained fo
 mutation prioritization (13 traits in our study, with serum TNF-α being the most
 predictable).
 
-### Step 5 — Selection pressure (dN/dS) analysis
-
-`script/count_nm_sm_by_sequence_gene.py`
-
-Counts nonsynonymous (Nm) and synonymous (Sm) substitutions per sequence and per
-gene directly from a SARS-CoV-2 MSA, relative to the Wuhan-Hu-1 reference, which
-are used to estimate dN/dS with the Nei–Gojobori method (e.g. on 7,425,083 Omicron
-sequences from GISAID):
-
-```bash
-python count_nm_sm_by_sequence_gene.py \
-    --msa gisaid_msa.fasta.gz \
-    --features gene_annotation.csv \
-    --out nm_sm_counts.csv \
-    --skip-reference
-```
-
 </br>
 
 ## Mutation features
@@ -292,43 +285,6 @@ Each mutation instance is represented by 15 features:
 | Protein stability | `delta_DDG_Env`, `delta_DDG_Int` (predicted ΔΔG under environmental/intracellular conditions) | Cov2Var |
 | Physicochemical properties | `Molecular_weight`, `Theoretical_PI`, `Extinction_coefficients`, `Aliphatic_index`, `grand_average_of_hydropathicity` | Cov2Var |
 | Functional impact | `Protein_Func` (pathogenicity), `SIFT_Probability`, `PROVEAN_Score` | Cov2Var / SIFT / PROVEAN |
-
-</br>
-
-## MIL model
-
-For a patient (bag) with mutations indexed by *k*, each mutation feature vector
-*h*<sub>k</sub> is encoded by a fully connected layer with 64 hidden units, ReLU
-activation and dropout (0.25). Gated-attention scores are computed as:
-
-*a*<sub>k</sub> = **w**ᵀ ( tanh(**V** h<sub>k</sub>) ⊙ sigmoid(**U** h<sub>k</sub>) )
-
-and attention weights are obtained by softmax normalization across all mutations of
-the same patient. The bag representation is the attention-weighted sum of mutation
-embeddings, which is passed through a linear regression layer to predict the
-clinical feature value. The model is optimized with mean squared error loss.
-
-To reduce the influence of variable bag sizes, attention weights are multiplied by
-the number of mutations of each patient before averaging. The final attention score
-of a mutation *m* is the mean adjusted attention across all patients carrying *m*,
-averaged over the 10 refittings.
-
-</br>
-
-## Data availability
-
-- SARS-CoV-2 genomic sequences and metadata were obtained from
-  [GISAID](https://www.gisaid.org/); we gratefully acknowledge all data
-  contributors.
-- The UShER phylogenetic tree was downloaded from the
-  [UCSC Genome Browser](http://hgdownload.soe.ucsc.edu/goldenPath/wuhCor1/UShER_SARS-CoV-2).
-- Conservation tracks (`wuhCor1.phyloP119way`, `wuhCor1.phastCons119way`) were
-  obtained from UCSC Genome Browser.
-- Mutation functional annotations were obtained from
-  [Cov2Var](https://bioinfo.uth.edu/cov2var/), [SIFT](https://sift.bii.a-star.edu.sg/)
-  and [PROVEAN](https://provean.jcvi.org/).
-- The time-series RNA-seq dataset generated in this study has been deposited in the
-  GEO database (accession to be released upon publication).
 
 </br>
 
