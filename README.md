@@ -5,7 +5,6 @@
 </br>
 
 ## What is ViMCA-MIL?
-[README.md](https://github.com/user-attachments/files/31009886/README.md)
 
 ViMCA-MIL is an integrated analysis framework that screens for SARS-CoV-2 mutations
 which simultaneously confer viral evolutionary advantages and impact host clinical
@@ -13,27 +12,27 @@ phenotypes. It integrates large-scale genomic surveillance data with matched
 virus–patient clinical records, and prioritizes candidate mutations through a
 gated-attention multiple-instance learning (MIL) model.
 
-Briefly, the framework consists of four steps:
+Briefly, the framework consists of five steps:
 
 1. **Evolutionary analysis.** Variant and mutation frequency trajectories are
    characterized across major SARS-CoV-2 variants using ~15.5 million genomic
    sequences from GISAID (Dec 2019 – Jan 2026) together with locally sequenced
    genomes from West China Hospital, Sichuan University.
    Recurrent mutations are clustered into evolutionary clusters to distinguish
-    *stable* from *sporadic* mutations.
-3. **Fitness and transmission analysis.** Relative viral fitness (R/R<sub>A</sub>)
+   *stable* from *sporadic* mutations.
+2. **Fitness and transmission analysis.** Relative viral fitness (R/R<sub>A</sub>)
    is estimated with the [PyR0](https://github.com/broadinstitute/pyro) workflow on
    the UShER phylogeny, and transmission selection coefficients are inferred from
    regional genomic surveillance data following
    [Lee *et al.*](https://www.nature.com/articles/s41467-024-55593-0).
    EVEscape-derived fitness effects are additionally computed per protein.
-4. **Clinical phenotype analysis.** For a cohort of 490 patients with matched viral
+3. **Clinical phenotype analysis.** For a cohort of 490 patients with matched viral
    genomes and clinical records (78 blood routine, blood chemistry, immune cell and
    cytokine/chemokine features), features are normalized (inverse normal
    transformation), adjusted for age, sex and a Charlson comorbidity index (CCI)
    weighted clinical burden score, and filtered by temporal correlation with the
    course of the pandemic, yielding 38 temporally correlated traits.
-5. **Gated-attention MIL modeling.** Each patient is treated as a *bag* of the
+4. **Gated-attention MIL modeling.** Each patient is treated as a *bag* of the
    mutations detected in the matched viral genome; each mutation is an *instance*
    represented by 15 mutation-level features. The model predicts each patient-level
    clinical feature value from the attention-weighted aggregation of its mutations,
@@ -79,40 +78,76 @@ ViMCA-MIL/
 
 ## Requirements
 
-### Python (MIL model)
+The analyses were performed on two servers:
 
-Developed with `Python 3.8+` and `PyTorch`. Required packages:
+- **Server 5130** (NVIDIA GeForce RTX 5090): MIL model training (conda
+  environment `CARP`) and dN/dS counting (conda environment `sarscov2_dnds`).
+- **Server 4103**: evolutionary, fitness and clinical phenotype analyses in R
+  (base environment).
 
-    torch (>= 1.10),
-    numpy (>= 1.21),
-    pandas (>= 1.3),
-    scikit-learn (>= 1.0),
-    scipy (>= 1.7),
-    tqdm (>= 4.60)
+### Python — MIL model (Server 5130, conda env `CARP`)
+
+| Software | Version |
+| --- | --- |
+| Python | 3.9.25 |
+| torch | 2.8.0 (CUDA 12.8) |
+| numpy | 1.26.4 |
+| pandas | 2.3.3 |
+| scikit-learn | 1.6.1 |
+| scipy | 1.13.1 |
+| tqdm | 4.67.1 |
 
 ```bash
-pip install torch numpy pandas scikit-learn scipy tqdm
+conda create -n CARP python=3.9
+conda activate CARP
+pip install torch==2.8.0 numpy==1.26.4 pandas==2.3.3 \
+    scikit-learn==1.6.1 scipy==1.13.1 tqdm==4.67.1
 ```
 
-A CUDA-capable GPU is recommended; the code automatically falls back to CPU.
+The code automatically falls back to CPU when no CUDA device is available.
 
-### R (evolutionary / fitness / clinical analysis)
+### Python — dN/dS counting (Server 5130, conda env `sarscov2_dnds`)
 
-Developed with `R 4.2.1`. Main packages used:
+| Software | Version |
+| --- | --- |
+| Python | 3.11.15 |
+| biopython | 1.87 |
+| pandas | 3.0.2 |
 
-    data.table, openxlsx, readxl, dplyr, tidyr, purrr, stringr, lubridate,
-    ggplot2, ggpubr, ggrepel, patchwork, cowplot, ggsci, RColorBrewer,
-    ComplexHeatmap, circlize, eulerr, binom, caret, bestNormalize, broom,
-    future.apply,  Biostrings, clusterProfiler
+```bash
+conda create -n sarscov2_dnds python=3.11
+conda activate sarscov2_dnds
+pip install biopython==1.87 pandas==3.0.2
+```
 
-External tools invoked by the analysis notebooks:
+### R — evolutionary / fitness / clinical analysis (Server 4103, base environment)
 
-- [fastp](https://github.com/OpenGene/fastp) (v0.23.2) — read preprocessing
-- [bowtie2](https://github.com/BenLangmead/bowtie2) (v2.4.4) — read alignment
-- [Nextclade](https://clades.nextstrain.org/) — mutation calling and lineage assignment
+Developed with `R 4.5.3`. Packages used by the Rmd scripts:
+
+| Category | Packages (version) |
+| --- | --- |
+| Data wrangling | data.table (1.18.2.1), dplyr (1.2.1), tidyr (1.3.2), purrr (1.2.2), stringr (1.6.0), magrittr (2.0.5), readr (2.2.0), readxl (1.4.5), openxlsx (4.2.8.1), broom (1.0.12), lubridate (1.9.5), scales (1.4.0) |
+| Statistics & modeling | caret (7.0.1), bestNormalize (1.9.2), binom (1.1.1.1), lessR (4.5.4), parallel (4.5.3) |
+| Visualization | ggplot2 (4.0.3), ggpubr (0.6.3), ggrepel (0.9.8), patchwork (1.3.2), cowplot (1.2.0), ggthemes (5.2.0), ggsci (5.0.0), RColorBrewer (1.1.3), circlize (0.4.18), ComplexHeatmap (2.26.1), eulerr (7.1.0) |
+| Parallel computing | future (1.70.0), future.apply (1.20.2) |
+| Bioconductor & enrichment | Biostrings (2.78.0), GSEABase (1.72.0), clusterProfiler (4.18.4), enrichplot (1.30.5), GseaVis (0.1.1) |
+| Sequence handling | seqinr (4.2.36) |
+
+External tools/workflows invoked by the analysis notebooks:
+
 - [PyR0](https://github.com/broadinstitute/pyro) — relative fitness estimation
-- [epi-covar](https://www.nature.com/articles/s41467-024-55593-0) — transmission selection coefficients
-- [EVEscape](https://github.com/broadinstitute/EVEscape) + [EVcouplings](https://github.com/debbiemarkslab/EVcouplings) — fitness-effect scores
+  (`preprocess_usher.py`, `mutrans.py` called in `02Fitness_analysis_v2.Rmd`)
+- [EVcouplings](https://github.com/debbiemarkslab/EVcouplings) — MSA construction
+  for EVEscape fitness-effect scores (`evcouplings_runcfg` called in
+  `03Clinical_phenotype_analysis_v2.Rmd`)
+- [epi-covar](https://www.nature.com/articles/s41467-024-55593-0) — transmission
+  selection coefficients
+
+Upstream sequencing preprocessing of the local cohort (not part of this
+repository) used [fastp](https://github.com/OpenGene/fastp) (v0.23.2),
+[bowtie2](https://github.com/BenLangmead/bowtie2) (v2.4.4) and
+[Nextclade](https://clades.nextstrain.org/) for mutation calling and lineage
+assignment.
 
 </br>
 
@@ -259,7 +294,7 @@ The pipeline runs in two phases:
 - **Phase 2 — refitting**: for traits whose mean validation Pearson correlation
   exceeds the threshold (`--r_threshold`), the model is refit 10 times on all
   matched samples with different seeds; mean mutation attention scores are
-  extracted (see [MIL model](#mil-model)).
+  extracted.
 
 To run all traits in parallel (6 jobs per batch by default), edit the paths at the
 top of `run_MIL.sh` and run:
@@ -305,4 +340,3 @@ If you find ViMCA-MIL useful, please cite our paper:
 > virulence. *(under submission)*
 
 </br>
-
