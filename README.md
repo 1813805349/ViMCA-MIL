@@ -78,14 +78,7 @@ ViMCA-MIL/
 
 ## Requirements
 
-The analyses were performed on two servers:
-
-- **Server 5130** (NVIDIA GeForce RTX 5090): MIL model training (conda
-  environment `CARP`) and dN/dS counting (conda environment `sarscov2_dnds`).
-- **Server 4103**: evolutionary, fitness and clinical phenotype analyses in R
-  (base environment).
-
-### Python — MIL model (Server 5130, conda env `CARP`)
+### Python
 
 | Software | Version |
 | --- | --- |
@@ -96,31 +89,18 @@ The analyses were performed on two servers:
 | scikit-learn | 1.6.1 |
 | scipy | 1.13.1 |
 | tqdm | 4.67.1 |
+| biopython | 1.85 |
 
 ```bash
-conda create -n CARP python=3.9
-conda activate CARP
+conda create -n MIL python=3.9
+conda activate MIL
 pip install torch==2.8.0 numpy==1.26.4 pandas==2.3.3 \
-    scikit-learn==1.6.1 scipy==1.13.1 tqdm==4.67.1
+    scikit-learn==1.6.1 scipy==1.13.1 tqdm==4.67.1 biopython==1.85
 ```
 
-The code automatically falls back to CPU when no CUDA device is available.
+The MIL model automatically falls back to CPU when no CUDA device is available.
 
-### Python — dN/dS counting (Server 5130, conda env `sarscov2_dnds`)
-
-| Software | Version |
-| --- | --- |
-| Python | 3.11.15 |
-| biopython | 1.87 |
-| pandas | 3.0.2 |
-
-```bash
-conda create -n sarscov2_dnds python=3.11
-conda activate sarscov2_dnds
-pip install biopython==1.87 pandas==3.0.2
-```
-
-### R — evolutionary / fitness / clinical analysis (Server 4103, base environment)
+### R
 
 Developed with `R 4.5.3`. Packages used by the Rmd scripts:
 
