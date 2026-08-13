@@ -12,7 +12,7 @@ phenotypes. It integrates large-scale genomic surveillance data with matched
 virus–patient clinical records, and prioritizes candidate mutations through a
 gated-attention multiple-instance learning (MIL) model.
 
-Briefly, the framework consists of five steps:
+Briefly, the framework consists of four steps:
 
 1. **Evolutionary analysis.** Variant and mutation frequency trajectories are
    characterized across major SARS-CoV-2 variants using ~15.5 million genomic
@@ -65,13 +65,22 @@ enhance viral replication while attenuating pulmonary pathogenicity.
 ```
 ViMCA-MIL/
 ├── README.md
-└── script/
-    ├── 01Evolutionary_analysis_variant_mutations_v2.Rmd   # Variant/mutation evolutionary dynamics
-    ├── 02Fitness_analysis_v2.Rmd                          # Relative fitness & transmission selection
-    ├── 03Clinical_phenotype_analysis_v2.Rmd               # Clinical feature preprocessing & temporal analysis
-    ├── MIL_bootstrap_multi_trait_260714.py                # Gated-attention MIL model (single trait per run)
-    ├── run_MIL.sh                                         # Batch launcher for all traits + summary merging
-    └── count_nm_sm_by_sequence_gene.py                    # Per-sequence/per-gene Nm & Sm counting (dN/dS)
+├── script/
+│   ├── 01Evolutionary_analysis_variant_mutations_v2.Rmd   # Variant/mutation evolutionary dynamics
+│   ├── 02Fitness_analysis_v2.Rmd                          # Relative fitness & transmission selection
+│   ├── 03Clinical_phenotype_analysis_v2.Rmd               # Clinical feature preprocessing & temporal analysis
+│   ├── MIL_bootstrap_multi_trait_260714.py                # Gated-attention MIL model (single trait per run)
+│   ├── run_MIL.sh                                         # Batch launcher for all traits + summary merging
+│   └── count_nm_sm_by_sequence_gene.py                    # Per-sequence/per-gene Nm & Sm counting (dN/dS)
+└── data/
+    ├── Table/                                             # Supplementary tables (Table S1–S8)
+    ├── Chengdu_data/                                      # Local cohort lineage metadata
+    ├── SARS_CoV_2_reference/                              # Reference genome & gene structure
+    ├── clinical_phenotype_analysis/                       # Clinical phenotypes & MIL inputs
+    │   └── MIL/prepeare/                                  # geno_feature.csv, phenotype matrix, Cov2Var annotations
+    ├── GISAID_260111/                                     # Derived GISAID results (mutation frequencies, clusters,
+    │                                                      #   selection coefficients, dN/dS annotations)
+    └── relative_fitness/pyr0/                             # PyR0 relative fitness results
 ```
 
 </br>
@@ -133,12 +142,10 @@ assignment.
 
 ## Input
 
-> **Note:** The scripts contain hard-coded working paths (e.g.
-> `SCRIPT`, `TRAIT_FILE`, `OUT_DIR` in `run_MIL.sh`; `GENO_PATH`, `PHENO_PATH` in
-> the MIL Python script). Please adapt these paths to your own environment before
-> running.
+All processed input data required by the MIL model and the downstream analyses
+are provided in `data/` of this repository. Patient identifiers are anonymized.
 
-#### 1. Mutation feature matrix — `geno_feature.csv`
+#### 1. Mutation feature matrix — `data/clinical_phenotype_analysis/MIL/prepeare/geno_feature.csv`
 
 A long-format data frame in which each row is one mutation detected in one patient,
 containing at least the following columns:
@@ -149,13 +156,13 @@ containing at least the following columns:
 | `mutation_id` | Mutation identifier (e.g. `Spike:D614G`) |
 | 15 feature columns | See [Mutation features](#mutation-features) |
 
-#### 2. Clinical phenotype matrix — `nor_pheno_by_Age_Gender_CCI.csv`
+#### 2. Clinical phenotype matrix — `data/clinical_phenotype_analysis/MIL/prepeare/nor_pheno_by_Age_Gender_CCI.csv`
 
 A data frame with one row per patient (`sample_id`) and one column per clinical
 feature. Values are normalized, covariate-adjusted (age, sex, CCI) and
 standardized, as described in `03Clinical_phenotype_analysis_v2.Rmd`.
 
-#### 3. Trait list — `traits.txt`
+#### 3. Trait list — `data/clinical_phenotype_analysis/MIL/traits.txt`
 
 A plain-text file listing one clinical trait (column name of the phenotype matrix)
 per line. `run_MIL.sh` launches one MIL job per trait.
@@ -163,8 +170,20 @@ per line. `run_MIL.sh` launches one MIL job per trait.
 #### 4. Multiple sequence alignment (optional, dN/dS analysis)
 
 A FASTA (optionally gzipped) multiple sequence alignment of SARS-CoV-2 genomes
-(e.g. the GISAID MSA), plus a gene/feature annotation table, used by
+(e.g. the GISAID MSA), plus the gene/feature annotation table
+(`data/GISAID_260111/dN_dS/sarscov2_features.tsv`), used by
 `count_nm_sm_by_sequence_gene.py`.
+
+#### Data not included
+
+Due to size and data-sharing agreements, the following raw inputs are not
+included, but the corresponding derived results are provided in `data/`:
+
+- GISAID sequence metadata (~15.5 million records) — download from
+  [GISAID](https://www.gisaid.org/) (registration required).
+- The GISAID multiple sequence alignment — available from GISAID.
+- The UShER phylogenetic tree for PyR0 — download from the
+  [UCSC Genome Browser](http://hgdownload.soe.ucsc.edu/goldenPath/wuhCor1/UShER_SARS-CoV-2).
 
 </br>
 
@@ -189,70 +208,23 @@ evaluated mutations are defined as high-attention mutations for that feature.
 
 ## Tutorial
 
-### Step 1 — Evolutionary analysis of variants and mutations
+The main executable deliverable of this repository is the gated-attention MIL
+pipeline. The R notebooks (`01`–`03`) are provided as reference implementations
+of the upstream analyses described above; their derived results are already
+included in `data/`, so the MIL model can be run directly.
 
-`script/01Evolutionary_analysis_variant_mutations_v2.Rmd`
-
-- Aggregates Pango lineages into major variant groups (e.g. `BA.2*`, `JN*`,
-  `XBB.1.5*`, `XDV*`, …) and computes weekly variant frequencies (global vs. China).
-- Retains 1,161 recurrent nonsynonymous mutations (frequency > 5% at any time point).
-- Builds a mutation–variant frequency matrix and clusters mutations into 12
-  evolutionary clusters using hierarchical clustering (`hclust`, `ward.D2`),
-  distinguishing stable from sporadic mutations.
-- Computes length-normalized mutation density per viral protein and plots mutation
-  frequency trajectories.
-
-### Step 2 — Viral fitness and transmission analysis
-
-`script/02Fitness_analysis_v2.Rmd`
-
-- **Relative fitness**: runs the PyR0 workflow (`preprocess_usher.py`,
-  `mutrans.py`) on the UShER tree from the UCSC Genome Browser.
-- **Transmission selection coefficient**: computes region-specific temporal
-  prevalence trajectories (`epi-covar.py`) and infers selection coefficients
-  (`epi-inf-parallel.py`).
-- Maps ORF1a/ORF1b mutations to Nsp coordinates and integrates EVEscape-derived
-  fitness effects.
-
-### Step 3 — Selection pressure (dN/dS) analysis
-
-`script/count_nm_sm_by_sequence_gene.py`
-
-Counts nonsynonymous (Nm) and synonymous (Sm) substitutions per sequence and per
-gene directly from a SARS-CoV-2 MSA, relative to the Wuhan-Hu-1 reference, which
-are used to estimate dN/dS with the Nei–Gojobori method:
-
-```bash
-python count_nm_sm_by_sequence_gene.py \
-    --msa gisaid_msa.fasta.gz \
-    --features gene_annotation.csv \
-    --out nm_sm_counts.csv \
-    --skip-reference
-```
-
-### Step 4 — Clinical phenotype preprocessing
-
-`script/03Clinical_phenotype_analysis_v2.Rmd`
-
-- Computes the Charlson-weighted clinical burden score (modified CCI by Quan *et
-  al.*) from inpatient diagnostic records.
-- Applies inverse normal transformation (`bestNormalize`), stepwise covariate
-  adjustment (age, sex, CCI; `caret`) and standardization to all 78 clinical
-  features.
-- Calculates Pearson temporal correlations between each clinical feature and the
-  infection date; the 38 significant features (P < 0.05) are retained as the MIL
-  phenotype set (16 severe-related, 14 non-severe-related, 8 unknown).
-
-### Step 5 — Gated-attention MIL modeling
+### Gated-attention MIL modeling
 
 `script/MIL_bootstrap_multi_trait_260714.py` + `script/run_MIL.sh`
 
-Single-trait usage:
+Single-trait usage (run from the `script/` directory so that the default
+`--geno`/`--pheno` paths resolve to `../data/`):
 
 ```bash
+cd script
 CUDA_VISIBLE_DEVICES=0 python MIL_bootstrap_multi_trait_260714.py \
-    --trait "TNF-a" \
-    --output_dir ./multi_traits_results \
+    --trait "TNF_a" \
+    --output_dir ../output/multi_traits_results \
     --n_boot 100 \
     --n_full 10 \
     --epochs 150 \
@@ -265,6 +237,8 @@ CUDA_VISIBLE_DEVICES=0 python MIL_bootstrap_multi_trait_260714.py \
     --save_phase2_pred 1
 ```
 
+Data paths can be overridden with `--geno` and `--pheno`.
+
 The pipeline runs in two phases:
 
 - **Phase 1 — stability screening**: 100 independent resampling runs; in each run
@@ -276,12 +250,14 @@ The pipeline runs in two phases:
   matched samples with different seeds; mean mutation attention scores are
   extracted.
 
-To run all traits in parallel (6 jobs per batch by default), edit the paths at the
-top of `run_MIL.sh` and run:
+To run all traits in parallel (6 jobs per batch by default), run from anywhere
+in the repository (paths are resolved relative to the repository root):
 
 ```bash
-bash run_MIL.sh
+bash script/run_MIL.sh
 ```
+
+Results are written to `output/multi_traits_results/`.
 
 Downstream, traits whose mean validation Pearson correlation exceeds the upper
 bound of the 95% confidence interval across all evaluated traits are retained for
@@ -320,3 +296,4 @@ If you find ViMCA-MIL useful, please cite our paper:
 > virulence. *(under submission)*
 
 </br>
+
